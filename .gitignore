@@ -1,0 +1,58 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches
+*.cache
+*.log
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor configs
+.vscode/
+.idea/
+
+# Compiled C/C++/Cython files
+*.so
+*.dll
+*.dylib
+*.pyd
+*.c
+*.cpp
+
+# PyTorch model weights
+*.pth
+*.pt
+
+# Captured training data
+data/images/
+data/labels.csv
+
+# Temporary files
+*.tmp
+*.bak
+
+# Output folders
+outputs/
+checkpoints/
+runs/
+
+# Other Python tools
+*.egg-info/
+dist/
+build/
+
+# VSCode local settings
+.vscode/settings.json
