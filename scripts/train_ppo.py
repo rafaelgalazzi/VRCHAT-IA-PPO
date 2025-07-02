@@ -3,8 +3,9 @@ from threading import Thread
 from queue import Queue
 from PIL import Image
 import numpy as np
+import os
 
-from agents.ppo_agent import VRChatAgent, get_vrchat_window_bbox, compute_proximity_reward
+from agents.ppo_agent import VRChatAgent, get_vrchat_window_bbox
 from utils.yolo_utils import analyze_image_with_yolo
 from mss import mss
 
@@ -19,8 +20,10 @@ TRAIN_MOUSE = False
 # Model paths
 KEYBOARD_MODEL_PATH = "ppo_keyboard_model.pth"
 MOUSE_MODEL_PATH = "ppo_mouse_model.pth"
+IMITATION_KEYBOARD_PATH = "imitation_keyboard_latest.pth"
+IMITATION_MOUSE_PATH = "imitation_mouse_latest.pth"
 
-# --- FRAME QUEUE + CAPTURE THREAD ---
+# --- FRAME QUEUE ---
 frame_queue = Queue(maxsize=10)
 
 def capture_thread():
@@ -36,11 +39,30 @@ def capture_thread():
         frame_queue.put(img_pil)
         time.sleep(STEP_DELAY)
 
-# --- MAIN TRAIN FUNCTION ---
 def train():
+    # Verifica se deve carregar pesos de imitação
+    keyboard_model_path = None
+    mouse_model_path = None
+
+    if TRAIN_KEYBOARD:
+        if os.path.exists(KEYBOARD_MODEL_PATH):
+            keyboard_model_path = KEYBOARD_MODEL_PATH
+            print("[INFO] Usando modelo PPO de teclado.")
+        elif os.path.exists(IMITATION_KEYBOARD_PATH):
+            keyboard_model_path = IMITATION_KEYBOARD_PATH
+            print("[INFO] Usando modelo de imitação para teclado.")
+
+    if TRAIN_MOUSE:
+        if os.path.exists(MOUSE_MODEL_PATH):
+            mouse_model_path = MOUSE_MODEL_PATH
+            print("[INFO] Usando modelo PPO de mouse.")
+        elif os.path.exists(IMITATION_MOUSE_PATH):
+            mouse_model_path = IMITATION_MOUSE_PATH
+            print("[INFO] Usando modelo de imitação para mouse.")
+
     agent = VRChatAgent(
-        keyboard_model_path=KEYBOARD_MODEL_PATH if TRAIN_KEYBOARD else None,
-        mouse_model_path=MOUSE_MODEL_PATH if TRAIN_MOUSE else None,
+        keyboard_model_path=keyboard_model_path,
+        mouse_model_path=mouse_model_path,
         train_keyboard=TRAIN_KEYBOARD,
         train_mouse=TRAIN_MOUSE,
         enable_mouse_reset=MOUSE_RESET
@@ -64,7 +86,6 @@ def train():
             key_action, mouse_action, key_value, key_log_prob, mouse_value, mouse_log_prob = agent.act(img)
 
             if key_action is None and mouse_action is None:
-                print("Ação inválida, pulando passo.")
                 continue
 
             keyboard_reward = agent.get_keyboard_reward(img, key_action, yolo_result) if TRAIN_KEYBOARD else None
@@ -82,9 +103,8 @@ def train():
                 mouse_value
             )
 
-            agent.step(img, yolo_result)  # Executa ações reais (opcional, pode comentar em testes offline)
+            agent.step(img, yolo_result)
 
-            # A cada 100 passos, treina e salva
             if steps_taken > 0 and steps_taken % 100 == 0:
                 agent.update()
                 agent.save()
@@ -93,8 +113,6 @@ def train():
             time.sleep(STEP_DELAY)
 
         print(f"[EP {episode+1}] Total reward: {total_reward:.2f} | Steps: {steps_taken}")
-
-        # Treina no fim do episódio
         agent.update()
         agent.save()
 
