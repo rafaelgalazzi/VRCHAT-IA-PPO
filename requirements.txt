@@ -1,0 +1,12 @@
+torch>=2.0.0
+torchvision>=0.15.0
+numpy
+pillow
+opencv-python
+matplotlib
+mss
+pyautogui
+pynput
+keyboard
+ultralytics
+pywin32
