@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -43,12 +44,12 @@ class MouseActorCritic(nn.Module):
     def forward(self, x):
         x = self.features(x)
         x = self.fc(x)
-        mean = torch.tanh(self.mean(x))
+        mean = torch.tanh(self.mean(x))  # valores entre -1 e 1
         std = torch.nn.functional.softplus(self.std(x)) + 1e-4
         return mean, std, self.critic(x)
 
 
-# Agente PPO com carregamento de pesos e treinamento
+# Agente PPO
 class VRChatAgent:
     def __init__(self, keyboard_model_path=None, mouse_model_path=None,
                  train_keyboard=True, train_mouse=True, enable_mouse_reset=False):
@@ -73,7 +74,23 @@ class VRChatAgent:
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
 
+        # Carregar normalização de movimento
+        self.mouse_dx_max = 1.0
+        self.mouse_dy_max = 1.0
+        self._load_mouse_normalization()
+
         self._load_models(keyboard_model_path, mouse_model_path)
+
+    def _load_mouse_normalization(self):
+        norm_file = "data/mouse_normalization.json"
+        if os.path.exists(norm_file):
+            with open(norm_file, "r") as f:
+                norm = json.load(f)
+                self.mouse_dx_max = norm.get("max_dx", 1.0)
+                self.mouse_dy_max = norm.get("max_dy", 1.0)
+            print(f"[INFO] Normalização carregada: dx={self.mouse_dx_max}, dy={self.mouse_dy_max}")
+        else:
+            print("[AVISO] Arquivo de normalização não encontrado. Usando escala padrão.")
 
     def _load_models(self, keyboard_model_path, mouse_model_path):
         if self.train_keyboard:
@@ -120,8 +137,9 @@ class VRChatAgent:
         keys = ["w", "s", "shift", "space", "a", "d"]
         for i, k in enumerate(keys):
             (key_down if key_action[i] > 0.5 else key_up)(k)
-        if self.enable_mouse_reset:
-            dx, dy = mouse_action * 30
+        if self.enable_mouse_reset and mouse_action is not None:
+            dx = int(mouse_action[0] * self.mouse_dx_max)
+            dy = int(mouse_action[1] * self.mouse_dy_max)
             move_mouse_relative(dx, dy)
 
     def store(self, img, actions, k_r, m_r, k_lp, k_val, m_lp, m_val):

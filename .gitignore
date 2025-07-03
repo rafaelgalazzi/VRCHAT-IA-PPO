@@ -39,6 +39,7 @@ Thumbs.db
 # Captured training data
 data/images/
 data/labels.csv
+data
 
 # Temporary files
 *.tmp

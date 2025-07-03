@@ -6,8 +6,9 @@ from PIL import ImageGrab
 import win32gui
 import win32con
 import numpy as np
+import json
+import os
 
-# Importa seu controle de input real
 from utils.input_controller import key_down, key_up, move_mouse_relative, KEYS
 
 # Configurações
@@ -16,6 +17,16 @@ IMAGE_SIZE = 224
 FPS = 10
 INTERVAL = 1.0 / FPS
 KEY_NAMES = ["w", "s", "shift", "space", "a", "d"]
+
+# Normalização
+NORMALIZATION_PATH = "data/mouse_normalization.json"
+mouse_norm = {"max_dx": 1.0, "max_dy": 1.0}
+if os.path.exists(NORMALIZATION_PATH):
+    with open(NORMALIZATION_PATH, "r") as f:
+        mouse_norm = json.load(f)
+    print(f"[INFO] Normalização de mouse carregada: {mouse_norm}")
+else:
+    print(f"[AVISO] Arquivo de normalização não encontrado: {NORMALIZATION_PATH}")
 
 # Modelos
 class KeyboardActor(nn.Module):
@@ -65,7 +76,7 @@ def get_vrchat_window_bbox():
     win32gui.SetForegroundWindow(hwnd)
     return win32gui.GetWindowRect(hwnd)
 
-# Inicialização
+# Inicialização dos modelos
 keyboard_model = KeyboardActor().to(DEVICE)
 mouse_model = MouseActor().to(DEVICE)
 keyboard_model.load_state_dict(torch.load("imitation_keyboard_latest.pth", map_location=DEVICE))
@@ -78,15 +89,12 @@ if not bbox:
     exit(1)
 
 print("[INFO] IA rodando... Pressione Ctrl+C para interromper.")
-
-# Estado das teclas
 prev_keys = np.zeros(len(KEY_NAMES))
 
 try:
     while True:
         start = time.time()
 
-        # Captura da imagem
         img = ImageGrab.grab(bbox=bbox).resize((IMAGE_SIZE, IMAGE_SIZE))
         img_tensor = transform(img).unsqueeze(0).to(DEVICE)
 
@@ -94,10 +102,12 @@ try:
             key_output = keyboard_model(img_tensor).cpu().numpy()[0]
             mouse_output = mouse_model(img_tensor).cpu().numpy()[0]
 
-        key_pressed = (key_output > 0.5).astype(int)
-        dx, dy = int(mouse_output[0]), int(mouse_output[1])
+        # Desnormaliza o movimento do mouse
+        dx = int(mouse_output[0] * mouse_norm["max_dx"])
+        dy = int(mouse_output[1] * mouse_norm["max_dy"])
 
-        # Envio de teclado
+        key_pressed = (key_output > 0.5).astype(int)
+
         for i, key_name in enumerate(KEY_NAMES):
             if key_pressed[i] and not prev_keys[i]:
                 key_down(key_name)
@@ -105,7 +115,6 @@ try:
                 key_up(key_name)
         prev_keys = key_pressed
 
-        # Envio de mouse
         if dx != 0 or dy != 0:
             move_mouse_relative(dx, dy)
 

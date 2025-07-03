@@ -4,6 +4,7 @@ from queue import Queue
 from PIL import Image
 import numpy as np
 import os
+import json
 
 from agents.ppo_agent import VRChatAgent, get_vrchat_window_bbox
 from utils.yolo_utils import analyze_image_with_yolo
@@ -22,6 +23,16 @@ KEYBOARD_MODEL_PATH = "ppo_keyboard_model.pth"
 MOUSE_MODEL_PATH = "ppo_mouse_model.pth"
 IMITATION_KEYBOARD_PATH = "imitation_keyboard_latest.pth"
 IMITATION_MOUSE_PATH = "imitation_mouse_latest.pth"
+
+# Normalization
+NORMALIZATION_PATH = "data/mouse_normalization.json"
+mouse_norm = {"max_dx": 1.0, "max_dy": 1.0}
+if os.path.exists(NORMALIZATION_PATH):
+    with open(NORMALIZATION_PATH, "r") as f:
+        mouse_norm = json.load(f)
+    print(f"[INFO] Normalização de mouse carregada: {mouse_norm}")
+else:
+    print(f"[AVISO] Arquivo de normalização não encontrado: {NORMALIZATION_PATH}")
 
 # --- FRAME QUEUE ---
 frame_queue = Queue(maxsize=10)
@@ -88,6 +99,13 @@ def train():
             if key_action is None and mouse_action is None:
                 continue
 
+            # Normalize mouse action before storing
+            if mouse_action is not None:
+                mouse_action = np.array([
+                    np.clip(mouse_action[0] / mouse_norm["max_dx"], -1, 1),
+                    np.clip(mouse_action[1] / mouse_norm["max_dy"], -1, 1)
+                ])
+
             keyboard_reward = agent.get_keyboard_reward(img, key_action, yolo_result) if TRAIN_KEYBOARD else None
             mouse_reward = agent.get_mouse_reward(img, mouse_action, yolo_result) if TRAIN_MOUSE else None
             total_reward += (keyboard_reward or 0) + (mouse_reward or 0)
@@ -103,7 +121,16 @@ def train():
                 mouse_value
             )
 
-            agent.step(img, yolo_result)
+            # Denormalize before applying to environment
+            if mouse_action is not None:
+                denorm_mouse = np.array([
+                    mouse_action[0] * mouse_norm["max_dx"],
+                    mouse_action[1] * mouse_norm["max_dy"]
+                ])
+            else:
+                denorm_mouse = None
+
+            agent.apply_actions(key_action, denorm_mouse)
 
             if steps_taken > 0 and steps_taken % 100 == 0:
                 agent.update()
