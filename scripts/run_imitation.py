@@ -10,12 +10,15 @@ from agents.imitation_agent import ImitationAgent
 from utils.input_controller import key_down, key_up, move_mouse_relative
 from utils.screen_utils import capture_vrchat_frame
 
-# Configurações
+# ---- Configurações ----
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 KEYS = ["w", "s", "shift", "space", "a", "d"]
-NORMALIZATION_PATH = "data/mouse_normalization.json"
+SEQ_LEN = 6  # número de frames empilhados
+FRAME_DELAY = 0.05
+INPUT_CHANNELS = 3 * SEQ_LEN
 
-# Carregar normalização
+# ---- Normalização do mouse ----
+NORMALIZATION_PATH = "data/mouse_normalization.json"
 mouse_norm = {"max_dx": 1.0, "max_dy": 1.0}
 if os.path.exists(NORMALIZATION_PATH):
     with open(NORMALIZATION_PATH, "r") as f:
@@ -24,8 +27,8 @@ if os.path.exists(NORMALIZATION_PATH):
 else:
     print(f"[AVISO] Arquivo de normalização não encontrado: {NORMALIZATION_PATH}")
 
-# Transformação da imagem
-transform = transforms.Compose([
+# ---- Transformação da imagem ----
+basic_transform = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
@@ -33,30 +36,42 @@ transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225])
 ])
 
-# Carregar modelos
-keyboard_model = ImitationAgent(output_dim=6, mode="keyboard").to(DEVICE)
-mouse_model = ImitationAgent(output_dim=2, mode="mouse").to(DEVICE)
+# ---- Modelos ----
+keyboard_model = ImitationAgent(output_dim=6, mode="keyboard", input_channels=INPUT_CHANNELS).to(DEVICE)
+mouse_model = ImitationAgent(output_dim=2, mode="mouse", input_channels=INPUT_CHANNELS).to(DEVICE)
 
 keyboard_model.load_state_dict(torch.load("imitation_keyboard_latest.pth", map_location=DEVICE))
 mouse_model.load_state_dict(torch.load("imitation_mouse_latest.pth", map_location=DEVICE))
 keyboard_model.eval()
 mouse_model.eval()
 
-print("[INFO] Modelos carregados. Iniciando inferência... Pressione Ctrl+C para parar.")
+# ---- Frame buffer ----
+frame_buffer = []
+
+print("[INFO] Modelos carregados. Iniciando inferência com contexto temporal... Pressione Ctrl+C para parar.")
 
 try:
     while True:
         img = capture_vrchat_frame()
         if img is None:
             print("[AVISO] Imagem não capturada.")
-            time.sleep(0.1)
+            time.sleep(FRAME_DELAY)
             continue
 
-        tensor = transform(img).unsqueeze(0).to(DEVICE)
+        tensor = basic_transform(img)
+        frame_buffer.append(tensor)
+
+        if len(frame_buffer) < SEQ_LEN:
+            time.sleep(FRAME_DELAY)
+            continue
+        elif len(frame_buffer) > SEQ_LEN:
+            frame_buffer.pop(0)
+
+        stacked = torch.cat(frame_buffer, dim=0).unsqueeze(0).to(DEVICE)
 
         with torch.no_grad():
-            key_probs = keyboard_model(tensor).squeeze().cpu().numpy()
-            mouse_movement = mouse_model(tensor).squeeze().cpu().numpy()
+            key_probs = keyboard_model(stacked).squeeze().cpu().numpy()
+            mouse_movement = mouse_model(stacked).squeeze().cpu().numpy()
 
         # Aplicar teclas
         for i, key in enumerate(KEYS):
@@ -65,12 +80,12 @@ try:
             else:
                 key_up(key)
 
-        # Desnormaliza o movimento do mouse
+        # Movimento do mouse
         dx = int(mouse_movement[0] * mouse_norm["max_dx"])
         dy = int(mouse_movement[1] * mouse_norm["max_dy"])
         move_mouse_relative(dx, dy)
 
-        time.sleep(0.05)
+        time.sleep(FRAME_DELAY)
 
 except KeyboardInterrupt:
     print("\n[INFO] Interrompido pelo usuário.")

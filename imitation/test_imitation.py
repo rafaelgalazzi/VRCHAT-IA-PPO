@@ -17,6 +17,8 @@ from utils.input_controller import key_down, key_up, KEYS, move_mouse_relative
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 KEY_LIST = list(KEYS.keys())
 NORM_PATH = "data/mouse_normalization.json"
+SEQ_LEN = 6  # número de frames empilhados
+FRAME_DELAY = 0.05  # tempo entre capturas (50ms ~ 20fps)
 
 # ---- Normalização do mouse ----
 with open(NORM_PATH, "r") as f:
@@ -24,16 +26,8 @@ with open(NORM_PATH, "r") as f:
 max_dx = mouse_norm["max_dx"]
 max_dy = mouse_norm["max_dy"]
 
-# ---- Carrega modelos ----
-keyboard_model = ImitationAgent(output_dim=len(KEY_LIST), mode="keyboard").to(DEVICE)
-mouse_model = ImitationAgent(output_dim=2, mode="mouse").to(DEVICE)
-keyboard_model.load_state_dict(torch.load("imitation_keyboard_latest.pth", map_location=DEVICE))
-mouse_model.load_state_dict(torch.load("imitation_mouse_latest.pth", map_location=DEVICE))
-keyboard_model.eval()
-mouse_model.eval()
-
-# ---- Transformação de imagem ----
-transform = transforms.Compose([
+# ---- Transformação de imagem (por frame) ----
+basic_transform = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
@@ -41,7 +35,20 @@ transform = transforms.Compose([
                          [0.229, 0.224, 0.225])
 ])
 
-print(f"[INFO] Rodando teclado + mouse - Pressione ESC para sair.")
+# ---- Modelos ----
+input_channels = 3 * SEQ_LEN
+keyboard_model = ImitationAgent(output_dim=len(KEY_LIST), mode="keyboard", input_channels=input_channels).to(DEVICE)
+mouse_model = ImitationAgent(output_dim=2, mode="mouse", input_channels=input_channels).to(DEVICE)
+
+keyboard_model.load_state_dict(torch.load("imitation_keyboard_latest.pth", map_location=DEVICE))
+mouse_model.load_state_dict(torch.load("imitation_mouse_latest.pth", map_location=DEVICE))
+keyboard_model.eval()
+mouse_model.eval()
+
+# ---- Buffer de frames ----
+frame_buffer = []
+
+print(f"[INFO] Rodando teclado + mouse com contexto temporal ({SEQ_LEN} frames) - Pressione ESC para sair.")
 prev_keys = np.zeros(len(KEY_LIST))
 
 try:
@@ -53,10 +60,21 @@ try:
         if img is None:
             continue
 
+        # Processa imagem e atualiza buffer
+        tensor = basic_transform(img)
+        frame_buffer.append(tensor)
+        if len(frame_buffer) < SEQ_LEN:
+            time.sleep(FRAME_DELAY)
+            continue
+        elif len(frame_buffer) > SEQ_LEN:
+            frame_buffer.pop(0)
+
+        # Empilha as imagens
+        stacked = torch.cat(frame_buffer, dim=0).unsqueeze(0).to(DEVICE)
+
         with torch.no_grad():
-            tensor = transform(img).unsqueeze(0).to(DEVICE)
-            key_output = keyboard_model(tensor).cpu().numpy().squeeze()
-            mouse_output = mouse_model(tensor).cpu().numpy().squeeze()
+            key_output = keyboard_model(stacked).cpu().numpy().squeeze()
+            mouse_output = mouse_model(stacked).cpu().numpy().squeeze()
 
         # ---- Teclado ----
         key_states = (key_output > 0.5).astype(int)
@@ -72,7 +90,7 @@ try:
         dy = int(mouse_output[1] * max_dy)
         move_mouse_relative(dx, dy)
 
-        time.sleep(0.05)
+        time.sleep(FRAME_DELAY)
 
 finally:
     for key in KEY_LIST:
