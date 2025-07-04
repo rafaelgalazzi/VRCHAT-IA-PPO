@@ -10,3 +10,4 @@ pynput
 keyboard
 ultralytics
 pywin32
+psutil
