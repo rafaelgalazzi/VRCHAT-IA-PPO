@@ -1,63 +1,78 @@
 import os
 import json
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from torchvision import models, transforms
+from collections import deque
+from torchvision import transforms
+from agents.imitation_agent import ImitationAgentLSTM
 from utils.input_controller import key_down, key_up, move_mouse_relative
+import win32gui
+import win32con
 
-# Modelos
+
+def get_vrchat_window_bbox():
+    hwnd = win32gui.FindWindow(None, "VRChat")
+    if hwnd == 0:
+        print("[ERRO] Janela do VRChat não encontrada!")
+        return None
+    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    win32gui.SetForegroundWindow(hwnd)
+    return win32gui.GetWindowRect(hwnd)
+
+
+# ======================
+# Actor-Critic Models
+# ======================
+
 class KeyboardActorCritic(nn.Module):
-    def __init__(self, num_keys=6):
+    def __init__(self, hidden_size=256):
         super().__init__()
-        resnet = models.resnet34(weights='IMAGENET1K_V1')
-        self.features = nn.Sequential(*list(resnet.children())[:-1])
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(resnet.fc.in_features, 256),
-            nn.ReLU()
+        self.actor = ImitationAgentLSTM(output_dim=6, mode="keyboard", hidden_size=hidden_size)
+        self.critic = nn.Sequential(
+            nn.Linear(6, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
         )
-        self.actor = nn.Linear(256, num_keys)
-        self.critic = nn.Linear(256, 1)
 
-    def forward(self, x):
-        x = self.features(x)
-        x = self.fc(x)
-        return torch.sigmoid(self.actor(x)), self.critic(x)
+    def forward(self, seq):  # seq: [B, T, 3, H, W]
+        probs = self.actor(seq)  # [B, 6]
+        value = self.critic(probs.detach())  # [B, 1]
+        return probs, value
 
 
 class MouseActorCritic(nn.Module):
-    def __init__(self):
+    def __init__(self, hidden_size=256):
         super().__init__()
-        resnet = models.resnet34(weights='IMAGENET1K_V1')
-        self.features = nn.Sequential(*list(resnet.children())[:-1])
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(resnet.fc.in_features, 256),
-            nn.ReLU()
+        self.actor = ImitationAgentLSTM(output_dim=2, mode="mouse", hidden_size=hidden_size)
+        self.critic = nn.Sequential(
+            nn.Linear(2, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
         )
-        self.mean = nn.Linear(256, 2)
-        self.std = nn.Linear(256, 2)
-        self.critic = nn.Linear(256, 1)
 
-    def forward(self, x):
-        x = self.features(x)
-        x = self.fc(x)
-        mean = torch.tanh(self.mean(x))  # valores entre -1 e 1
-        std = torch.nn.functional.softplus(self.std(x)) + 1e-4
-        return mean, std, self.critic(x)
+    def forward(self, seq):
+        mean = self.actor(seq)
+        std = torch.ones_like(mean) * 0.2
+        value = self.critic(mean.detach())
+        return mean, std, value
 
 
-# Agente PPO
+# ======================
+# PPO Agent
+# ======================
+
 class VRChatAgent:
     def __init__(self, keyboard_model_path=None, mouse_model_path=None,
-                 train_keyboard=True, train_mouse=True, enable_mouse_reset=False):
+                 train_keyboard=True, train_mouse=True, enable_mouse_reset=False, stack_size=8):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.train_keyboard = train_keyboard
         self.train_mouse = train_mouse
         self.enable_mouse_reset = enable_mouse_reset
+        self.stack_size = stack_size
 
         self.keyboard_model = KeyboardActorCritic().to(self.device)
         self.mouse_model = MouseActorCritic().to(self.device)
@@ -66,63 +81,48 @@ class VRChatAgent:
         self.m_opt = optim.Adam(self.mouse_model.parameters(), lr=1e-4)
 
         self.buffer = []
+        self.last_mouse_move_time = time.time()
+        self.last_mouse_pos = None
 
         self.transform = transforms.Compose([
             transforms.Resize(256),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            transforms.Normalize([0.485, 0.456, 0.406],
+                                 [0.229, 0.224, 0.225])
         ])
 
-        # Carregar normalização de movimento
         self.mouse_dx_max = 1.0
         self.mouse_dy_max = 1.0
         self._load_mouse_normalization()
-
         self._load_models(keyboard_model_path, mouse_model_path)
 
     def _load_mouse_normalization(self):
-        norm_file = "data/mouse_normalization.json"
-        if os.path.exists(norm_file):
-            with open(norm_file, "r") as f:
+        path = "data/mouse_normalization.json"
+        if os.path.exists(path):
+            with open(path, "r") as f:
                 norm = json.load(f)
                 self.mouse_dx_max = norm.get("max_dx", 1.0)
                 self.mouse_dy_max = norm.get("max_dy", 1.0)
-            print(f"[INFO] Normalização carregada: dx={self.mouse_dx_max}, dy={self.mouse_dy_max}")
-        else:
-            print("[AVISO] Arquivo de normalização não encontrado. Usando escala padrão.")
 
-    def _load_models(self, keyboard_model_path, mouse_model_path):
-        if self.train_keyboard:
-            if keyboard_model_path and os.path.exists(keyboard_model_path):
-                self.keyboard_model.load_state_dict(torch.load(keyboard_model_path, map_location=self.device))
-                print("[INFO] Pesos PPO de teclado carregados.")
-            elif os.path.exists("imitation_keyboard_latest.pth"):
-                self.keyboard_model.load_state_dict(torch.load("imitation_keyboard_latest.pth", map_location=self.device), strict=False)
-                print("[INFO] Pesos de imitação para teclado carregados.")
+    def _load_models(self, keyboard_path, mouse_path):
+        if self.train_keyboard and keyboard_path and os.path.exists(keyboard_path):
+            self.keyboard_model.actor.load_state_dict(torch.load(keyboard_path, map_location=self.device))
+        if self.train_mouse and mouse_path and os.path.exists(mouse_path):
+            self.mouse_model.actor.load_state_dict(torch.load(mouse_path, map_location=self.device))
 
-        if self.train_mouse:
-            if mouse_model_path and os.path.exists(mouse_model_path):
-                self.mouse_model.load_state_dict(torch.load(mouse_model_path, map_location=self.device))
-                print("[INFO] Pesos PPO de mouse carregados.")
-            elif os.path.exists("imitation_mouse_latest.pth"):
-                self.mouse_model.load_state_dict(torch.load("imitation_mouse_latest.pth", map_location=self.device), strict=False)
-                print("[INFO] Pesos de imitação para mouse carregados.")
-
-    def act(self, img):
-        tensor = self.transform(img).unsqueeze(0).to(self.device)
-
+    def act(self, stacked_seq):  # stacked_seq: [1, T, 3, 224, 224]
         key_action = key_logprob = key_value = None
         mouse_action = mouse_logprob = mouse_value = None
 
         if self.train_keyboard:
-            probs, key_value = self.keyboard_model(tensor)
+            probs, key_value = self.keyboard_model(stacked_seq)
             dist = torch.distributions.Bernoulli(probs)
             key_action = dist.sample()
             key_logprob = dist.log_prob(key_action)
 
         if self.train_mouse:
-            mean, std, mouse_value = self.mouse_model(tensor)
+            mean, std, mouse_value = self.mouse_model(stacked_seq)
             dist = torch.distributions.Normal(mean, std)
             mouse_action = dist.sample()
             mouse_logprob = dist.log_prob(mouse_action)
@@ -142,9 +142,9 @@ class VRChatAgent:
             dy = int(mouse_action[1] * self.mouse_dy_max)
             move_mouse_relative(dx, dy)
 
-    def store(self, img, actions, k_r, m_r, k_lp, k_val, m_lp, m_val):
+    def store(self, seq, actions, k_r, m_r, k_lp, k_val, m_lp, m_val):
         self.buffer.append({
-            "img": img,
+            "seq": seq,
             "key_action": actions[0],
             "mouse_action": actions[1],
             "key_reward": k_r,
@@ -159,23 +159,23 @@ class VRChatAgent:
         if not self.buffer:
             return
 
-        imgs = torch.stack([self.transform(b["img"]) for b in self.buffer]).to(self.device)
+        seqs = torch.stack([b["seq"].squeeze(0) for b in self.buffer]).to(self.device)  # [B, T, 3, 224, 224]
 
         if self.train_keyboard:
             actions = torch.tensor([b["key_action"] for b in self.buffer], dtype=torch.float32).to(self.device)
             rewards = torch.tensor([b["key_reward"] for b in self.buffer], dtype=torch.float32).to(self.device)
             logprobs_old = torch.stack([b["key_logprob"].squeeze() for b in self.buffer]).to(self.device)
-            values_old = torch.cat([b["key_value"] for b in self.buffer]).squeeze().to(self.device)
+            values_old = torch.cat([b["key_value"] for b in self.buffer]).squeeze()
 
-            probs, values_new = self.keyboard_model(imgs)
+            probs, values_new = self.keyboard_model(seqs)
             dist = torch.distributions.Bernoulli(probs)
             logprobs_new = dist.log_prob(actions)
             entropy = dist.entropy().mean()
 
             advantage = rewards - values_old.detach()
             ratio = (logprobs_new - logprobs_old).exp()
-            clip = torch.clamp(ratio, 0.8, 1.2) * advantage
-            policy_loss = -torch.min(ratio * advantage, clip).mean()
+            clipped = torch.clamp(ratio, 0.8, 1.2) * advantage
+            policy_loss = -torch.min(ratio * advantage, clipped).mean()
             value_loss = 0.5 * (values_new.squeeze() - rewards).pow(2).mean()
 
             loss = policy_loss + value_loss - 0.01 * entropy
@@ -187,17 +187,17 @@ class VRChatAgent:
             actions = torch.tensor([b["mouse_action"] for b in self.buffer], dtype=torch.float32).to(self.device)
             rewards = torch.tensor([b["mouse_reward"] for b in self.buffer], dtype=torch.float32).to(self.device)
             logprobs_old = torch.stack([b["mouse_logprob"].sum() for b in self.buffer]).to(self.device)
-            values_old = torch.cat([b["mouse_value"] for b in self.buffer]).squeeze().to(self.device)
+            values_old = torch.cat([b["mouse_value"] for b in self.buffer]).squeeze()
 
-            mean, std, values_new = self.mouse_model(imgs)
+            mean, std, values_new = self.mouse_model(seqs)
             dist = torch.distributions.Normal(mean, std)
             logprobs_new = dist.log_prob(actions).sum(dim=1)
             entropy = dist.entropy().sum(dim=1).mean()
 
             advantage = rewards - values_old.detach()
             ratio = (logprobs_new - logprobs_old).exp()
-            clip = torch.clamp(ratio, 0.8, 1.2) * advantage
-            policy_loss = -torch.min(ratio * advantage, clip).mean()
+            clipped = torch.clamp(ratio, 0.8, 1.2) * advantage
+            policy_loss = -torch.min(ratio * advantage, clipped).mean()
             value_loss = 0.5 * (values_new.squeeze() - rewards).pow(2).mean()
 
             loss = policy_loss + value_loss - 0.01 * entropy
@@ -207,24 +207,40 @@ class VRChatAgent:
 
         self.buffer = []
 
-    def get_keyboard_reward(self, img, key_action, yolo_result):
-        person_count, obstacle_detected, _ = yolo_result
+    def get_keyboard_reward(self, img, key_action=None, yolo_result=None):
         reward = 0.0
-        if person_count > 0:
-            reward += 1.0
-        if obstacle_detected:
-            reward -= 0.5
+
+        if yolo_result is not None:
+            person_count, obstacle_detected, _ = yolo_result
+
+            # Recompensa por tentar desviar se há obstáculo
+            if obstacle_detected and key_action is not None:
+                desvio = key_action[1] > 0.5 or key_action[4] > 0.5 or key_action[5] > 0.5  # s, a, d
+                if desvio:
+                    reward += 0.5
+                if key_action[0] > 0.5:  # w
+                    reward -= 0.2  # penalidade por ir de frente contra obstáculo
+
         return reward
 
-    def get_mouse_reward(self, img, mouse_action, yolo_result):
-        _, _, bboxes = yolo_result
+    def get_mouse_reward(self, img, mouse_action=None, yolo_result=None):
         reward = 0.0
-        if bboxes:
-            center_x = img.width / 2
-            centers = [(x1 + x2) / 2 for (x1, _, x2, _) in bboxes]
-            avg_center = np.mean(centers)
-            dist = abs(avg_center - center_x)
-            reward += max(0, 1 - dist / (img.width / 2))
+        if mouse_action is not None:
+            moved = self.last_mouse_pos is None or np.linalg.norm(mouse_action - self.last_mouse_pos) > 0.01
+            if moved:
+                self.last_mouse_move_time = time.time()
+                self.last_mouse_pos = mouse_action
+            elif time.time() - self.last_mouse_move_time > 5:
+                reward -= 0.5
+
+        if yolo_result:
+            _, _, bboxes = yolo_result
+            if bboxes:
+                center_x = img.width / 2
+                centers = [(x1 + x2) / 2 for (x1, _, x2, _) in bboxes]
+                avg_center = np.mean(centers)
+                dist = abs(avg_center - center_x)
+                reward += max(0, 1 - dist / (img.width / 2))
         return reward
 
     def save(self):

@@ -3,44 +3,29 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
 
-class ImitationAgent(nn.Module):
-    def __init__(self, output_dim, mode="keyboard", input_channels=3):
+class ImitationAgentLSTM(nn.Module):
+    def __init__(self, output_dim, mode="keyboard", hidden_size=256):
         super().__init__()
         self.mode = mode
 
-        # Carrega modelo base
         base = models.resnet34(weights='IMAGENET1K_V1')
+        self.feature_extractor = nn.Sequential(*list(base.children())[:-1])  # Remove fc
+        self.feature_dim = 512  # ResNet34 output
 
-        # Modifica a primeira convolução se input_channels for diferente de 3
-        if input_channels != 3:
-            original_conv = base.conv1
-            new_conv = nn.Conv2d(
-                in_channels=input_channels,
-                out_channels=original_conv.out_channels,
-                kernel_size=original_conv.kernel_size,
-                stride=original_conv.stride,
-                padding=original_conv.padding,
-                bias=original_conv.bias is not None
-            )
+        self.lstm = nn.LSTM(input_size=self.feature_dim, hidden_size=hidden_size, batch_first=True)
 
-            # Inicializa os primeiros 3 canais com os pesos existentes
-            with torch.no_grad():
-                new_conv.weight[:, :3, :, :] = original_conv.weight
-                if input_channels > 3:
-                    for i in range(3, input_channels):
-                        new_conv.weight[:, i:i+1, :, :] = original_conv.weight[:, :1, :, :]
-            
-            base.conv1 = new_conv
-
-        self.backbone = nn.Sequential(*list(base.children())[:-1])
-        self.flatten = nn.Flatten()
-        self.fc = nn.Linear(512, 256)
+        self.fc = nn.Linear(hidden_size, 256)
         self.head = nn.Linear(256, output_dim)
 
-    def forward(self, x):
-        x = self.backbone(x)
-        x = self.flatten(x)
-        x = F.relu(self.fc(x))
+    def forward(self, x):  # x: [B, T, 3, H, W]
+        B, T, C, H, W = x.size()
+        x = x.view(B * T, C, H, W)
+        feats = self.feature_extractor(x).view(B, T, -1)  # [B, T, 512]
+
+        lstm_out, _ = self.lstm(feats)  # [B, T, H]
+        last = lstm_out[:, -1]  # Última saída
+
+        x = F.relu(self.fc(last))
         x = self.head(x)
 
         if self.mode == "keyboard":
@@ -48,4 +33,4 @@ class ImitationAgent(nn.Module):
         elif self.mode == "mouse":
             return x
         else:
-            raise ValueError("Modo inválido: use 'keyboard' ou 'mouse'")
+            raise ValueError("Modo inválido")

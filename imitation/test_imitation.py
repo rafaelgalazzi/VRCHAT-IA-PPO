@@ -9,7 +9,7 @@ from torchvision import transforms
 from PIL import Image
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from agents.imitation_agent import ImitationAgent
+from agents.imitation_agent import ImitationAgentLSTM
 from utils.screen_utils import capture_vrchat_frame
 from utils.input_controller import key_down, key_up, KEYS, move_mouse_relative
 
@@ -17,8 +17,8 @@ from utils.input_controller import key_down, key_up, KEYS, move_mouse_relative
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 KEY_LIST = list(KEYS.keys())
 NORM_PATH = "data/mouse_normalization.json"
-SEQ_LEN = 6  # número de frames empilhados
-FRAME_DELAY = 0.05  # tempo entre capturas (50ms ~ 20fps)
+SEQ_LEN = 6
+FRAME_DELAY = 0.05
 
 # ---- Normalização do mouse ----
 with open(NORM_PATH, "r") as f:
@@ -26,7 +26,7 @@ with open(NORM_PATH, "r") as f:
 max_dx = mouse_norm["max_dx"]
 max_dy = mouse_norm["max_dy"]
 
-# ---- Transformação de imagem (por frame) ----
+# ---- Transformação de imagem ----
 basic_transform = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(224),
@@ -35,10 +35,9 @@ basic_transform = transforms.Compose([
                          [0.229, 0.224, 0.225])
 ])
 
-# ---- Modelos ----
-input_channels = 3 * SEQ_LEN
-keyboard_model = ImitationAgent(output_dim=len(KEY_LIST), mode="keyboard", input_channels=input_channels).to(DEVICE)
-mouse_model = ImitationAgent(output_dim=2, mode="mouse", input_channels=input_channels).to(DEVICE)
+# ---- Modelos LSTM ----
+keyboard_model = ImitationAgentLSTM(output_dim=len(KEY_LIST), mode="keyboard").to(DEVICE)
+mouse_model = ImitationAgentLSTM(output_dim=2, mode="mouse").to(DEVICE)
 
 keyboard_model.load_state_dict(torch.load("imitation_keyboard_latest.pth", map_location=DEVICE))
 mouse_model.load_state_dict(torch.load("imitation_mouse_latest.pth", map_location=DEVICE))
@@ -48,7 +47,7 @@ mouse_model.eval()
 # ---- Buffer de frames ----
 frame_buffer = []
 
-print(f"[INFO] Rodando teclado + mouse com contexto temporal ({SEQ_LEN} frames) - Pressione ESC para sair.")
+print(f"[INFO] Rodando teclado + mouse com contexto temporal ({SEQ_LEN} frames via LSTM) - Pressione ESC para sair.")
 prev_keys = np.zeros(len(KEY_LIST))
 
 try:
@@ -60,21 +59,21 @@ try:
         if img is None:
             continue
 
-        # Processa imagem e atualiza buffer
         tensor = basic_transform(img)
         frame_buffer.append(tensor)
+
         if len(frame_buffer) < SEQ_LEN:
             time.sleep(FRAME_DELAY)
             continue
         elif len(frame_buffer) > SEQ_LEN:
             frame_buffer.pop(0)
 
-        # Empilha as imagens
-        stacked = torch.cat(frame_buffer, dim=0).unsqueeze(0).to(DEVICE)
+        # Constrói o batch [1, T, 3, H, W]
+        sequence = torch.stack(frame_buffer, dim=0).unsqueeze(0).to(DEVICE)
 
         with torch.no_grad():
-            key_output = keyboard_model(stacked).cpu().numpy().squeeze()
-            mouse_output = mouse_model(stacked).cpu().numpy().squeeze()
+            key_output = keyboard_model(sequence).cpu().numpy().squeeze()
+            mouse_output = mouse_model(sequence).cpu().numpy().squeeze()
 
         # ---- Teclado ----
         key_states = (key_output > 0.5).astype(int)

@@ -1,13 +1,18 @@
 import time
-from threading import Thread
-from queue import Queue
-from PIL import Image
-import numpy as np
 import os
 import json
+import sys
+from threading import Thread
+from queue import Queue
+from collections import deque
+from PIL import Image
+import numpy as np
+import torch
+import keyboard  # <- Novo para parar com ESC
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from agents.ppo_agent import VRChatAgent, get_vrchat_window_bbox
-from utils.yolo_utils import analyze_image_with_yolo
+from utils.yolo_utils import analyze_image_with_yolo, load_yolo_model
 from mss import mss
 
 # --- CONFIG ---
@@ -17,14 +22,19 @@ STEP_DELAY = 1.0 / 20  # 20 FPS
 MOUSE_RESET = True
 TRAIN_KEYBOARD = True
 TRAIN_MOUSE = False
+YOLO_INTERVAL = 10
+FRAME_STACK = 6
 
-# Model paths
+# Caminhos dos modelos
 KEYBOARD_MODEL_PATH = "ppo_keyboard_model.pth"
 MOUSE_MODEL_PATH = "ppo_mouse_model.pth"
 IMITATION_KEYBOARD_PATH = "imitation_keyboard_latest.pth"
 IMITATION_MOUSE_PATH = "imitation_mouse_latest.pth"
 
-# Normalization
+# YOLO
+yolo_model = load_yolo_model("yolov8n.pt")
+
+# Normalização do mouse
 NORMALIZATION_PATH = "data/mouse_normalization.json"
 mouse_norm = {"max_dx": 1.0, "max_dy": 1.0}
 if os.path.exists(NORMALIZATION_PATH):
@@ -34,14 +44,14 @@ if os.path.exists(NORMALIZATION_PATH):
 else:
     print(f"[AVISO] Arquivo de normalização não encontrado: {NORMALIZATION_PATH}")
 
-# --- FRAME QUEUE ---
+# Frame queue
 frame_queue = Queue(maxsize=10)
 
 def capture_thread():
     sct = mss()
     rect = get_vrchat_window_bbox()
     if not rect:
-        print("VRChat window not found.")
+        print("[ERRO] Janela do VRChat não encontrada.")
         return
     monitor = {"top": rect[1], "left": rect[0], "width": rect[2] - rect[0], "height": rect[3] - rect[1]}
     while True:
@@ -51,25 +61,19 @@ def capture_thread():
         time.sleep(STEP_DELAY)
 
 def train():
-    # Verifica se deve carregar pesos de imitação
+    # Escolhe modelos de entrada
     keyboard_model_path = None
     mouse_model_path = None
-
     if TRAIN_KEYBOARD:
         if os.path.exists(KEYBOARD_MODEL_PATH):
             keyboard_model_path = KEYBOARD_MODEL_PATH
-            print("[INFO] Usando modelo PPO de teclado.")
         elif os.path.exists(IMITATION_KEYBOARD_PATH):
             keyboard_model_path = IMITATION_KEYBOARD_PATH
-            print("[INFO] Usando modelo de imitação para teclado.")
-
     if TRAIN_MOUSE:
         if os.path.exists(MOUSE_MODEL_PATH):
             mouse_model_path = MOUSE_MODEL_PATH
-            print("[INFO] Usando modelo PPO de mouse.")
         elif os.path.exists(IMITATION_MOUSE_PATH):
             mouse_model_path = IMITATION_MOUSE_PATH
-            print("[INFO] Usando modelo de imitação para mouse.")
 
     agent = VRChatAgent(
         keyboard_model_path=keyboard_model_path,
@@ -79,57 +83,73 @@ def train():
         enable_mouse_reset=MOUSE_RESET
     )
 
-    print("Iniciando captura e treinamento...")
+    frame_stack = deque(maxlen=FRAME_STACK)
     Thread(target=capture_thread, daemon=True).start()
+    print("[INFO] Iniciando captura e treinamento... Pressione ESC para parar.")
 
     for episode in range(EPISODES):
+        if keyboard.is_pressed("esc"):
+            print("[INFO] Treinamento interrompido antes do episódio. Salvando...")
+            agent.save()
+            break
+
         total_reward = 0
         steps_taken = 0
 
         for step in range(STEPS_PER_EPISODE):
+            if keyboard.is_pressed("esc"):
+                print("[INFO] Treinamento interrompido no meio do episódio. Salvando...")
+                agent.save()
+                return
+
             if frame_queue.empty():
                 time.sleep(0.01)
                 continue
 
-            img = frame_queue.get()
-            yolo_result = analyze_image_with_yolo(img)
+            raw_frame = frame_queue.get()
+            frame_stack.append(raw_frame)
 
-            key_action, mouse_action, key_value, key_log_prob, mouse_value, mouse_log_prob = agent.act(img)
+            if len(frame_stack) < FRAME_STACK:
+                continue
 
+            # Empilha e transforma
+            stacked_tensor = torch.stack([agent.transform(f) for f in frame_stack])  # [T, 3, 224, 224]
+            stacked_tensor = stacked_tensor.unsqueeze(0).to(agent.device)  # [1, T, 3, 224, 224]
+
+            yolo_result = analyze_image_with_yolo(yolo_model, frame_stack[-1]) if step % YOLO_INTERVAL == 0 else None
+
+            key_action, mouse_action, key_val, key_logp, mouse_val, mouse_logp = agent.act(stacked_tensor)
             if key_action is None and mouse_action is None:
                 continue
 
-            # Normalize mouse action before storing
             if mouse_action is not None:
                 mouse_action = np.array([
                     np.clip(mouse_action[0] / mouse_norm["max_dx"], -1, 1),
                     np.clip(mouse_action[1] / mouse_norm["max_dy"], -1, 1)
                 ])
 
-            keyboard_reward = agent.get_keyboard_reward(img, key_action, yolo_result) if TRAIN_KEYBOARD else None
-            mouse_reward = agent.get_mouse_reward(img, mouse_action, yolo_result) if TRAIN_MOUSE else None
-            total_reward += (keyboard_reward or 0) + (mouse_reward or 0)
+            # Recompensa
+            k_reward = agent.get_keyboard_reward(frame_stack[-1], key_action, yolo_result) if TRAIN_KEYBOARD else None
+            m_reward = agent.get_mouse_reward(frame_stack[-1], mouse_action, yolo_result) if TRAIN_MOUSE else None
+            total_reward += (k_reward or 0) + (m_reward or 0)
 
             agent.store(
-                img,
+                stacked_tensor.squeeze(0),
                 (key_action, mouse_action),
-                keyboard_reward,
-                mouse_reward,
-                key_log_prob,
-                key_value,
-                mouse_log_prob,
-                mouse_value
+                k_reward,
+                m_reward,
+                key_logp,
+                key_val,
+                mouse_logp,
+                mouse_val
             )
 
-            # Denormalize before applying to environment
+            denorm_mouse = None
             if mouse_action is not None:
                 denorm_mouse = np.array([
                     mouse_action[0] * mouse_norm["max_dx"],
                     mouse_action[1] * mouse_norm["max_dy"]
                 ])
-            else:
-                denorm_mouse = None
-
             agent.apply_actions(key_action, denorm_mouse)
 
             if steps_taken > 0 and steps_taken % 100 == 0:
@@ -139,7 +159,7 @@ def train():
             steps_taken += 1
             time.sleep(STEP_DELAY)
 
-        print(f"[EP {episode+1}] Total reward: {total_reward:.2f} | Steps: {steps_taken}")
+        print(f"[EP {episode + 1}] Total reward: {total_reward:.2f} | Steps: {steps_taken}")
         agent.update()
         agent.save()
 

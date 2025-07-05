@@ -16,7 +16,7 @@ DATA_DIR = "data/images"
 LABEL_FILE = "data/labels.csv"
 FPS = 20
 INTERVAL = 1.0 / FPS
-IMAGE_FORMAT = "jpeg"  # ou "png"
+IMAGE_FORMAT = "jpeg"
 JPEG_QUALITY = 90
 
 # === ESTADO GLOBAL ===
@@ -25,6 +25,7 @@ mouse_dx = 0
 mouse_dy = 0
 recording = [True]
 paused = [False]
+session_id = [1]
 frame_queue = Queue()
 label_queue = Queue()
 
@@ -72,7 +73,6 @@ class RAWINPUT(ctypes.Structure):
     _fields_ = [("header", RAWINPUTHEADER),
                 ("data", RAWINPUTUNION)]
 
-# WNDPROC corretamente tipada
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.DefWindowProcW.restype = ctypes.c_long
@@ -118,7 +118,7 @@ def start_raw_input_listener():
                                   0, 0, 0, 0,
                                   None, None, hInstance, None)
 
-    rid = RAWINPUTDEVICE(0x01, 0x02, 0x00000100, hwnd)  # Mouse
+    rid = RAWINPUTDEVICE(0x01, 0x02, 0x00000100, hwnd)
     if not user32.RegisterRawInputDevices(ctypes.byref(rid), 1, ctypes.sizeof(rid)):
         raise ctypes.WinError()
 
@@ -131,10 +131,15 @@ def start_raw_input_listener():
 def on_press(key):
     try:
         if hasattr(key, 'char') and key.char:
-            pressed_keys.add(key.char.lower())
-            if key.char.lower() == 'p':
+            char = key.char.lower()
+            pressed_keys.add(char)
+            if char == 'p':
                 paused[0] = not paused[0]
-                print("[PAUSA]" if paused[0] else "[RESUMIDO]")
+                if paused[0]:
+                    print("[PAUSA]")
+                else:
+                    session_id[0] += 1
+                    print(f"[RESUMIDO] Nova sessão: {session_id[0]}")
         elif hasattr(key, 'name'):
             pressed_keys.add(key.name)
     except:
@@ -160,10 +165,10 @@ def get_vrchat_window_bbox():
         return win32gui.GetWindowRect(hwnd)
     return None
 
-def save_label(image_name, keys, dx, dy, timestamp):
-    with open(LABEL_FILE, "a", newline="") as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow([image_name, "+".join(keys), dx, dy, f"{timestamp:.3f}"])
+def save_label(image_name, keys, dx, dy, timestamp, session):
+    with open(LABEL_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([image_name, "+".join(keys), dx, dy, f"{timestamp:.3f}", session])
 
 def image_worker():
     while recording[0] or not frame_queue.empty():
@@ -186,11 +191,33 @@ def label_worker():
         except Empty:
             continue
 
+def get_last_session_id(label_file):
+    if not os.path.exists(label_file):
+        return 0
+    try:
+        with open(label_file, "r") as f:
+            reader = csv.DictReader(f)
+            last_id = 0
+            for row in reader:
+                if "session_id" in row and row["session_id"].isdigit():
+                    last_id = max(last_id, int(row["session_id"]))
+        return last_id
+    except Exception as e:
+        print(f"[ERRO] Falha ao ler sessão do CSV: {e}")
+        return 0
+
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
+
+    # Se o arquivo não existe, criar com cabeçalho
     if not os.path.exists(LABEL_FILE):
         with open(LABEL_FILE, "w", newline="") as f:
-            csv.writer(f).writerow(["image", "keys", "mouse_dx", "mouse_dy", "timestamp"])
+            csv.writer(f).writerow(["image", "keys", "mouse_dx", "mouse_dy", "timestamp", "session_id"])
+
+    # Determinar o ID da nova sessão com base no último valor do CSV
+    last_session = get_last_session_id(LABEL_FILE)
+    session_id[0] = last_session + 1
+    print(f"[INFO] Última sessão: {last_session} → Nova sessão: {session_id[0]}")
 
     rect = get_vrchat_window_bbox()
     if not rect:
@@ -198,6 +225,7 @@ def main():
         return
 
     print("Iniciando gravação. Pressione ESC para sair, P para pausar/resumir.")
+    print(f"[SESSÃO ATUAL] {session_id[0]}")
 
     threading.Thread(target=start_raw_input_listener, daemon=True).start()
     threading.Thread(target=keyboard.Listener(on_press=on_press, on_release=on_release).start, daemon=True).start()
@@ -207,35 +235,31 @@ def main():
         threading.Thread(target=label_worker, daemon=True).start()
 
     global mouse_dx, mouse_dy
-    start_global = time.time()
+    start_time = time.time()
 
     while recording[0]:
         if paused[0]:
             time.sleep(0.1)
             continue
 
-        t0 = time.time()
-        now = time.time()
-        timestamp = now - start_global
+        timestamp = time.time() - start_time
 
         img = ImageGrab.grab(bbox=rect).resize((224, 224))
         filename = f"{uuid.uuid4()}.{IMAGE_FORMAT}"
         path = os.path.join(DATA_DIR, filename)
 
         frame_queue.put((img, path))
-        label_queue.put((filename, pressed_keys.copy(), mouse_dx, mouse_dy, timestamp))
+        label_queue.put((filename, pressed_keys.copy(), mouse_dx, mouse_dy, timestamp, session_id[0]))
 
         mouse_dx = 0
         mouse_dy = 0
 
-        elapsed = time.time() - t0
-        if elapsed < INTERVAL:
-            time.sleep(INTERVAL - elapsed)
+        time.sleep(INTERVAL)
 
     print("Finalizando gravação...")
     frame_queue.join()
     label_queue.join()
     print("Gravação finalizada.")
-
+    
 if __name__ == "__main__":
     main()
