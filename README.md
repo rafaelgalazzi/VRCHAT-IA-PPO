@@ -1,8 +1,3 @@
-Got it! Here's a clean, **humanized `README.md`** with no emojis, focused on clarity and a friendly tone:
-
----
-
-```markdown
 # VRChat AI – Imitation and Reinforcement Learning Agent
 
 This project is an AI system designed to interact with VRChat in real-time. It uses two learning approaches: imitation learning (where it learns from example behavior) and reinforcement learning (where it learns by trial and error using rewards).
@@ -28,34 +23,32 @@ The agent captures what's happening on screen, analyzes it with a YOLOv8 object 
 ## Project structure
 
 ```
-
 project-root/
 │
 ├── scripts/
-│   ├── generate\_tensor\_cache.py       # Converts images to tensor files for training
-│   ├── train\_ppo.py                   # Trains PPO reinforcement model
-│   ├── run\_imitation.py              # Runs the trained imitation model
-│   ├── run\_inference.py              # Runs the trained PPO model
+│   ├── generate_tensor_cache.py       # Converts images to tensor files for training
+│   ├── train_ppo.py                   # Trains PPO reinforcement model
+│   ├── run_imitation.py              # Runs the trained imitation model
+│   ├── run_inference.py              # Runs the trained PPO model
 │
 ├── imitation/
-│   ├── train\_imitation.py            # Trains the supervised imitation model
-│   ├── test\_imitation.py             # Evaluates the imitation model
+│   ├── train_imitation.py            # Trains the supervised imitation model
+│   ├── test_imitation.py             # Evaluates the imitation model
 │
 ├── data/
-│   ├── record\_screen.py              # Records gameplay and actions for training
-│   ├── mouse\_normalization.json      # Mouse movement scaling factors
+│   ├── record_screen.py              # Records gameplay and actions for training
+│   ├── mouse_normalization.json      # Mouse movement scaling factors
 │
 ├── agents/
-│   └── ppo\_agent.py                  # PPO agent logic and storage
+│   └── ppo_agent.py                  # PPO agent logic and storage
 │
 ├── utils/
-│   └── yolo\_utils.py                 # YOLOv8 wrapper and image analysis
+│   └── yolo_utils.py                 # YOLOv8 wrapper and image analysis
 │
-├── main\_menu.py                      # Interactive terminal menu to run tasks
+├── main_menu.py                      # Interactive terminal menu to run tasks
 ├── globals.py                        # Main training loop and screen capture logic
 └── README.md                         # Project documentation
-
-````
+```
 
 ---
 
@@ -66,22 +59,19 @@ project-root/
 1. Record gameplay data (screens + actions):
 ```bash
 python data/record_screen.py
-````
+```
 
 2. Train the imitation model:
-
 ```bash
 python imitation/train_imitation.py
 ```
 
 3. Test the model:
-
 ```bash
 python imitation/test_imitation.py
 ```
 
 4. Run inference:
-
 ```bash
 python scripts/run_imitation.py
 ```
@@ -89,13 +79,11 @@ python scripts/run_imitation.py
 ### PPO (Reinforcement Learning)
 
 1. Train the PPO model:
-
 ```bash
 python scripts/train_ppo.py
 ```
 
 2. Run inference with the trained model:
-
 ```bash
 python scripts/run_inference.py
 ```
@@ -114,19 +102,18 @@ python main_menu.py
 
 ## Requirements
 
-* Python 3.8+
-* PyTorch
-* torchvision
-* numpy
-* mss
-* Pillow
-* keyboard
-* psutil
-* YOLOv8 (via `ultralytics`)
-* A CUDA-compatible GPU (recommended for training)
+- Python 3.8+
+- PyTorch
+- torchvision
+- numpy
+- mss
+- Pillow
+- keyboard
+- psutil
+- YOLOv8 (via `ultralytics`)
+- A CUDA-compatible GPU (recommended for training)
 
 To install everything:
-
 ```bash
 pip install -r requirements.txt
 ```
@@ -135,9 +122,9 @@ pip install -r requirements.txt
 
 ## Notes
 
-* VRChat must be running in **windowed mode** so it can be captured correctly.
-* YOLOv8 is used for object detection. Make sure the `yolov8n.pt` model file is available.
-* During PPO training, progress is automatically saved and can be resumed if interrupted.
+- VRChat must be running in **windowed mode** so it can be captured correctly.
+- YOLOv8 is used for object detection. Make sure the `yolov8n.pt` model file is available.
+- During PPO training, progress is automatically saved and can be resumed if interrupted.
 
 ---
 
@@ -149,13 +136,6 @@ This project is open source and licensed under the MIT License.
 
 ## Acknowledgments
 
-* YOLOv8 by Ultralytics
-* PPO concepts inspired by OpenAI's work
-* Thanks to the open-source community for tools and frameworks that made this possible
-
-```
-
----
-
-Would you like a version in Portuguese as well? Or a sample `requirements.txt` file to go with it?
-```
+- YOLOv8 by Ultralytics
+- PPO concepts inspired by OpenAI's work
+- Thanks to the open-source community for tools and frameworks that made this possible
