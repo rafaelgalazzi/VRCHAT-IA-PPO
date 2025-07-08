@@ -23,7 +23,31 @@ The agent captures what's happening on screen, analyzes it with a YOLOv8 object 
 ## Project structure
 
 ```
-<pre> project-root/ ├── scripts/ │ ├── generate_tensor_cache.py ← Converts images to tensor files │ ├── train_ppo.py ← Trains PPO model │ ├── run_imitation.py ← Runs imitation model │ ├── run_inference.py ← Runs PPO model ├── imitation/ │ ├── train_imitation.py ← Trains supervised imitation model │ ├── test_imitation.py ← Tests imitation model ├── data/ │ ├── record_screen.py ← Records gameplay for imitation │ ├── mouse_normalization.json ← Mouse movement scaling data ├── agents/ │ └── ppo_agent.py ← PPO agent logic ├── utils/ │ └── yolo_utils.py ← YOLOv8 object detection ├── main_menu.py ← CLI to access all scripts ├── globals.py ← Training loop and capture logic └── README.md ← Project documentation </pre>
+project-root/
+│
+├── scripts/
+│   ├── generate_tensor_cache.py       # Converts images to tensor files for training
+│   ├── train_ppo.py                   # Trains PPO reinforcement model
+│   ├── run_imitation.py              # Runs the trained imitation model
+│   ├── run_inference.py              # Runs the trained PPO model
+│
+├── imitation/
+│   ├── train_imitation.py            # Trains the supervised imitation model
+│   ├── test_imitation.py             # Evaluates the imitation model
+│
+├── data/
+│   ├── record_screen.py              # Records gameplay and actions for training
+│   ├── mouse_normalization.json      # Mouse movement scaling factors
+│
+├── agents/
+│   └── ppo_agent.py                  # PPO agent logic and storage
+│
+├── utils/
+│   └── yolo_utils.py                 # YOLOv8 wrapper and image analysis
+│
+├── main_menu.py                      # Interactive terminal menu to run tasks
+├── globals.py                        # Main training loop and screen capture logic
+└── README.md                         # Project documentation
 ```
 
 ---
