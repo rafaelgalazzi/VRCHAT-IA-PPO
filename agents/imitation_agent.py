@@ -23,7 +23,7 @@ class ImitationAgentLSTM(nn.Module):
         feats = self.feature_extractor(x).view(B, T, -1)  # [B, T, 512]
 
         lstm_out, _ = self.lstm(feats)  # [B, T, H]
-        last = lstm_out[:, -1]  # Última saída
+        last = lstm_out[:, -1]
 
         x = F.relu(self.fc(last))
         x = self.head(x)
@@ -33,4 +33,4 @@ class ImitationAgentLSTM(nn.Module):
         elif self.mode == "mouse":
             return x
         else:
-            raise ValueError("Modo inválido")
+            raise ValueError("Invalid Mode!")

@@ -19,14 +19,14 @@ def analyze_image_with_yolo(model, img):
 
     for r in results:
         if r.boxes.cls is None:
-            continue  # Nenhuma detecção
+            continue
 
         for cls, bbox in zip(r.boxes.cls, r.boxes.xyxy):
             cls_id = int(cls.item())
             bbox_np = bbox.cpu().numpy()
 
             if np.any(np.isnan(bbox_np)):
-                continue  # Ignora boxes inválidos
+                continue 
 
             if cls_id == 0:  # COCO class 0: person
                 person_count += 1

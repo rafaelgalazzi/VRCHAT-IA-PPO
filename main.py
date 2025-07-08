@@ -1,66 +1,66 @@
 import os
 import subprocess
 
-# Caminhos importantes
+# Important paths
 CHECKPOINT_IMITATION = "checkpoint_latest.pth"
 
 OPTIONS = {
-    "0": ("Gerar cache de imagens (.pt)", "python scripts/generate_tensor_cache.py"),
-    "1": ("Gravar dados para imitação", "python data/record_screen.py"),
-    "2": ("Treinar modelo de imitação", "python imitation/train_imitation.py"),
-    "3": ("Testar modelo de imitação", "python imitation/test_imitation.py"),
-    "4": ("Treinar com PPO", "python scripts/train_ppo.py"),
-    "5": ("Rodar IA com modelo treinado (inferência)", None),
-    "q": ("Sair", None)
+    "0": ("Generate image cache (.pt)", "python scripts/generate_tensor_cache.py"),
+    "1": ("Record data for imitation", "python data/record_screen.py"),
+    "2": ("Train imitation model", "python imitation/train_imitation.py"),
+    "3": ("Test imitation model", "python imitation/test_imitation.py"),
+    "4": ("Train with PPO", "python scripts/train_ppo.py"),
+    "5": ("Run AI with trained model (inference)", None),
+    "q": ("Quit", None)
 }
 
 def run_inference():
-    print("\n[INFO] Escolha o modelo para rodar:")
-    print("[1] Imitação (modelo supervisionado)")
-    print("[2] PPO (modelo por reforço)")
+    print("\n[INFO] Choose the model to run:")
+    print("[1] Imitation (supervised model)")
+    print("[2] PPO (reinforcement learning model)")
 
-    choice = input("Modelo: ").strip()
+    choice = input("Model: ").strip()
     if choice == "1":
         command = "python scripts/run_imitation.py"
     elif choice == "2":
         command = "python scripts/run_inference.py"
     else:
-        print("Opção inválida.")
+        print("Invalid option.")
         return
 
-    print(f"\n[INFO] Executando: {command}")
+    print(f"\n[INFO] Running: {command}")
     subprocess.run(command, shell=True)
 
 def run_with_options(command: str, checkpoint_path: str):
-    # Escolher se vai usar cache
-    use_cache = input("Usar cache de imagens (.pt)? (s/n): ").strip().lower()
-    os.environ["USE_IMAGE_CACHE"] = "1" if use_cache == "s" else "0"
+    # Ask whether to use image cache
+    use_cache = input("Use image cache (.pt)? (y/n): ").strip().lower()
+    os.environ["USE_IMAGE_CACHE"] = "1" if use_cache == "y" else "0"
 
-    # Verificar se há checkpoint
+    # Check for existing checkpoint
     if os.path.exists(checkpoint_path):
-        print(f"\n[INFO] Checkpoint detectado em '{checkpoint_path}'")
-        resume = input("Deseja continuar de onde parou? (s/n): ").strip().lower()
-        if resume == "s":
+        print(f"\n[INFO] Checkpoint found at '{checkpoint_path}'")
+        resume = input("Resume from last checkpoint? (y/n): ").strip().lower()
+        if resume == "y":
             os.environ["RESUME_CHECKPOINT"] = "1"
-            print("[INFO] Retomando o treinamento...")
+            print("[INFO] Resuming training...")
 
-    print(f"\n[INFO] Executando: {command}\n")
+    print(f"\n[INFO] Running: {command}\n")
     subprocess.run(command, shell=True)
 
 def main():
     while True:
-        print("\n== MENU PRINCIPAL ==")
+        print("\n== MAIN MENU ==")
         for k, (desc, _) in sorted(OPTIONS.items()):
             print(f"[{k}] {desc}")
         
-        choice = input("Escolha uma opção: ").lower()
+        choice = input("Choose an option: ").lower()
         if choice not in OPTIONS:
-            print("Opção inválida. Tente novamente.")
+            print("Invalid option. Please try again.")
             continue
 
         desc, command = OPTIONS[choice]
         if choice == "q":
-            print("Saindo...")
+            print("Exiting...")
             break
 
         if choice == "5":
@@ -68,7 +68,7 @@ def main():
         elif choice == "2":
             run_with_options(command, CHECKPOINT_IMITATION)
         else:
-            print(f"\n[INFO] Executando: {desc}\n")
+            print(f"\n[INFO] Running: {desc}\n")
             subprocess.run(command, shell=True)
 
 if __name__ == "__main__":

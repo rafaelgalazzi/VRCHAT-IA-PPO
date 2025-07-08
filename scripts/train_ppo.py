@@ -2,30 +2,30 @@ import time
 import os
 import json
 import sys
-from threading import Thread
-from queue import Queue
 from collections import deque
 from PIL import Image
 import numpy as np
 import torch
-import keyboard  # <- Novo para parar com ESC
+import keyboard
+from mss import mss
+import psutil
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from agents.ppo_agent import VRChatAgent, get_vrchat_window_bbox
 from utils.yolo_utils import analyze_image_with_yolo, load_yolo_model
-from mss import mss
 
 # --- CONFIG ---
 EPISODES = 10000
 STEPS_PER_EPISODE = 500
 STEP_DELAY = 1.0 / 20  # 20 FPS
-MOUSE_RESET = True
 TRAIN_KEYBOARD = True
-TRAIN_MOUSE = False
+TRAIN_MOUSE = True
 YOLO_INTERVAL = 10
 FRAME_STACK = 6
+UPDATE_INTERVAL = 100
 
-# Caminhos dos modelos
+# Model paths
 KEYBOARD_MODEL_PATH = "ppo_keyboard_model.pth"
 MOUSE_MODEL_PATH = "ppo_mouse_model.pth"
 IMITATION_KEYBOARD_PATH = "imitation_keyboard_latest.pth"
@@ -34,92 +34,87 @@ IMITATION_MOUSE_PATH = "imitation_mouse_latest.pth"
 # YOLO
 yolo_model = load_yolo_model("yolov8n.pt")
 
-# Normalização do mouse
+# Mouse normalization
 NORMALIZATION_PATH = "data/mouse_normalization.json"
 mouse_norm = {"max_dx": 1.0, "max_dy": 1.0}
 if os.path.exists(NORMALIZATION_PATH):
     with open(NORMALIZATION_PATH, "r") as f:
         mouse_norm = json.load(f)
-    print(f"[INFO] Normalização de mouse carregada: {mouse_norm}")
+    print(f"[INFO] Mouse normalization loaded: {mouse_norm}")
 else:
-    print(f"[AVISO] Arquivo de normalização não encontrado: {NORMALIZATION_PATH}")
+    print(f"[WARNING] Normalization file not found: {NORMALIZATION_PATH}")
 
-# Frame queue
-frame_queue = Queue(maxsize=10)
+# Transform
+from torchvision import transforms
+transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
 
-def capture_thread():
-    sct = mss()
-    rect = get_vrchat_window_bbox()
-    if not rect:
-        print("[ERRO] Janela do VRChat não encontrada.")
-        return
-    monitor = {"top": rect[1], "left": rect[0], "width": rect[2] - rect[0], "height": rect[3] - rect[1]}
-    while True:
+# Screen capture
+rect = get_vrchat_window_bbox()
+if not rect:
+    print("[ERROR] VRChat window not found.")
+    sys.exit()
+monitor = {"top": rect[1], "left": rect[0], "width": rect[2] - rect[0], "height": rect[3] - rect[1]}
+
+
+def capture_frame():
+    with mss() as sct:
         img = sct.grab(monitor)
-        img_pil = Image.frombytes("RGB", img.size, img.rgb).resize((224, 224), Image.Resampling.LANCZOS)
-        frame_queue.put(img_pil)
-        time.sleep(STEP_DELAY)
+        return Image.frombytes("RGB", img.size, img.rgb)
+
 
 def train():
-    # Escolhe modelos de entrada
-    keyboard_model_path = None
-    mouse_model_path = None
-    if TRAIN_KEYBOARD:
-        if os.path.exists(KEYBOARD_MODEL_PATH):
-            keyboard_model_path = KEYBOARD_MODEL_PATH
-        elif os.path.exists(IMITATION_KEYBOARD_PATH):
-            keyboard_model_path = IMITATION_KEYBOARD_PATH
-    if TRAIN_MOUSE:
-        if os.path.exists(MOUSE_MODEL_PATH):
-            mouse_model_path = MOUSE_MODEL_PATH
-        elif os.path.exists(IMITATION_MOUSE_PATH):
-            mouse_model_path = IMITATION_MOUSE_PATH
+    keyboard_model_path = KEYBOARD_MODEL_PATH if os.path.exists(KEYBOARD_MODEL_PATH) else IMITATION_KEYBOARD_PATH
+    mouse_model_path = MOUSE_MODEL_PATH if os.path.exists(MOUSE_MODEL_PATH) else IMITATION_MOUSE_PATH
 
     agent = VRChatAgent(
         keyboard_model_path=keyboard_model_path,
         mouse_model_path=mouse_model_path,
         train_keyboard=TRAIN_KEYBOARD,
         train_mouse=TRAIN_MOUSE,
-        enable_mouse_reset=MOUSE_RESET
     )
 
-    frame_stack = deque(maxlen=FRAME_STACK)
-    Thread(target=capture_thread, daemon=True).start()
-    print("[INFO] Iniciando captura e treinamento... Pressione ESC para parar.")
+    frame_buffer = deque(maxlen=FRAME_STACK)
+
+    print("[INFO] Starting training... Press ESC to stop.")
 
     for episode in range(EPISODES):
         if keyboard.is_pressed("esc"):
-            print("[INFO] Treinamento interrompido antes do episódio. Salvando...")
+            print("[INFO] Interrupted before episode. Saving...")
             agent.save()
             break
 
         total_reward = 0
         steps_taken = 0
 
-        for step in range(STEPS_PER_EPISODE):
+        while steps_taken < STEPS_PER_EPISODE:
             if keyboard.is_pressed("esc"):
-                print("[INFO] Treinamento interrompido no meio do episódio. Salvando...")
+                print("[INFO] Interrupted mid-episode. Saving...")
                 agent.save()
                 return
 
-            if frame_queue.empty():
-                time.sleep(0.01)
+            img = capture_frame()
+            if img is None:
                 continue
 
-            raw_frame = frame_queue.get()
-            frame_stack.append(raw_frame)
+            frame_buffer.append(transform(img))
 
-            if len(frame_stack) < FRAME_STACK:
+            if len(frame_buffer) < FRAME_STACK:
+                time.sleep(STEP_DELAY)
                 continue
 
-            # Empilha e transforma
-            stacked_tensor = torch.stack([agent.transform(f) for f in frame_stack])  # [T, 3, 224, 224]
-            stacked_tensor = stacked_tensor.unsqueeze(0).to(agent.device)  # [1, T, 3, 224, 224]
+            sequence = torch.stack(list(frame_buffer), dim=0).unsqueeze(0).to(agent.device)
 
-            yolo_result = analyze_image_with_yolo(yolo_model, frame_stack[-1]) if step % YOLO_INTERVAL == 0 else None
+            yolo_result = analyze_image_with_yolo(yolo_model, img) if steps_taken % YOLO_INTERVAL == 0 else None
 
-            key_action, mouse_action, key_val, key_logp, mouse_val, mouse_logp = agent.act(stacked_tensor)
+            key_action, mouse_action, key_val, key_logp, mouse_val, mouse_logp = agent.act(sequence)
+
             if key_action is None and mouse_action is None:
+                time.sleep(STEP_DELAY)
                 continue
 
             if mouse_action is not None:
@@ -128,13 +123,12 @@ def train():
                     np.clip(mouse_action[1] / mouse_norm["max_dy"], -1, 1)
                 ])
 
-            # Recompensa
-            k_reward = agent.get_keyboard_reward(frame_stack[-1], key_action, yolo_result) if TRAIN_KEYBOARD else None
-            m_reward = agent.get_mouse_reward(frame_stack[-1], mouse_action, yolo_result) if TRAIN_MOUSE else None
+            k_reward = agent.get_keyboard_reward(img, key_action, yolo_result) if TRAIN_KEYBOARD else None
+            m_reward = agent.get_mouse_reward(img, mouse_action, yolo_result) if TRAIN_MOUSE else None
             total_reward += (k_reward or 0) + (m_reward or 0)
 
             agent.store(
-                stacked_tensor.squeeze(0),
+                sequence.squeeze(0).detach(),
                 (key_action, mouse_action),
                 k_reward,
                 m_reward,
@@ -152,16 +146,20 @@ def train():
                 ])
             agent.apply_actions(key_action, denorm_mouse)
 
-            if steps_taken > 0 and steps_taken % 100 == 0:
+            if steps_taken > 0 and steps_taken % UPDATE_INTERVAL == 0:
                 agent.update()
-                agent.save()
+                torch.cuda.empty_cache()
 
             steps_taken += 1
+
+            cuda_mem = torch.cuda.memory_allocated(agent.device) / (1024 ** 3)
+            print(f"[DEBUG] EP {episode + 1} STEP {steps_taken} | Buffer: {len(agent.buffer)} | CUDA Mem: {cuda_mem:.2f} GB")
             time.sleep(STEP_DELAY)
 
         print(f"[EP {episode + 1}] Total reward: {total_reward:.2f} | Steps: {steps_taken}")
         agent.update()
         agent.save()
+
 
 if __name__ == "__main__":
     train()

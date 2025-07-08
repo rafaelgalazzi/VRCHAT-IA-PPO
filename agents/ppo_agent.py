@@ -16,7 +16,7 @@ import win32con
 def get_vrchat_window_bbox():
     hwnd = win32gui.FindWindow(None, "VRChat")
     if hwnd == 0:
-        print("[ERRO] Janela do VRChat não encontrada!")
+        print("[ERROR] Window not found!")
         return None
     win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
     win32gui.SetForegroundWindow(hwnd)
@@ -66,12 +66,11 @@ class MouseActorCritic(nn.Module):
 
 class VRChatAgent:
     def __init__(self, keyboard_model_path=None, mouse_model_path=None,
-                 train_keyboard=True, train_mouse=True, enable_mouse_reset=False, stack_size=8):
+                 train_keyboard=True, train_mouse=True, stack_size=8):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.train_keyboard = train_keyboard
         self.train_mouse = train_mouse
-        self.enable_mouse_reset = enable_mouse_reset
         self.stack_size = stack_size
 
         self.keyboard_model = KeyboardActorCritic().to(self.device)
@@ -137,7 +136,7 @@ class VRChatAgent:
         keys = ["w", "s", "shift", "space", "a", "d"]
         for i, k in enumerate(keys):
             (key_down if key_action[i] > 0.5 else key_up)(k)
-        if self.enable_mouse_reset and mouse_action is not None:
+        if mouse_action is not None:
             dx = int(mouse_action[0] * self.mouse_dx_max)
             dy = int(mouse_action[1] * self.mouse_dy_max)
             move_mouse_relative(dx, dy)
@@ -213,13 +212,13 @@ class VRChatAgent:
         if yolo_result is not None:
             person_count, obstacle_detected, _ = yolo_result
 
-            # Recompensa por tentar desviar se há obstáculo
+            
             if obstacle_detected and key_action is not None:
                 desvio = key_action[1] > 0.5 or key_action[4] > 0.5 or key_action[5] > 0.5  # s, a, d
                 if desvio:
                     reward += 0.5
                 if key_action[0] > 0.5:  # w
-                    reward -= 0.2  # penalidade por ir de frente contra obstáculo
+                    reward -= 0.2
 
         return reward
 

@@ -49,17 +49,17 @@ mouse_model.eval()
 # ---- Buffer de frames ----
 frame_buffer = deque(maxlen=SEQ_LEN)
 
-print("[INFO] Inferência iniciada com LSTM. Pressione ESC para parar.")
+print("[INFO] Starting inference... Press ESC to stop.")
 
 try:
     while True:
         if keyboard.is_pressed("esc"):
-            print("\n[INFO] Interrompido via ESC. Liberando teclas...")
+            print("\n[INFO] Interrupted by ESC. Releasing keys...")
             break
 
         img = capture_vrchat_frame()
         if img is None:
-            print("[AVISO] Imagem não capturada.")
+            print("[WARNING] Image not captured.")
             time.sleep(FRAME_DELAY)
             continue
 
@@ -95,4 +95,4 @@ except Exception as e:
 finally:
     for key in KEYS:
         key_up(key)
-    print("[INFO] Teclas liberadas. Execução finalizada.")
+    print("[INFO] Releasing keys... Finished.")

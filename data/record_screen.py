@@ -136,10 +136,10 @@ def on_press(key):
             if char == 'p':
                 paused[0] = not paused[0]
                 if paused[0]:
-                    print("[PAUSA]")
+                    print("[PAUSE]")
                 else:
                     session_id[0] += 1
-                    print(f"[RESUMIDO] Nova sessão: {session_id[0]}")
+                    print(f"[RESUME] New session: {session_id[0]}")
         elif hasattr(key, 'name'):
             pressed_keys.add(key.name)
     except:
@@ -203,7 +203,7 @@ def get_last_session_id(label_file):
                     last_id = max(last_id, int(row["session_id"]))
         return last_id
     except Exception as e:
-        print(f"[ERRO] Falha ao ler sessão do CSV: {e}")
+        print(f"[ERROR] Fail to get last session id: {e}")
         return 0
 
 def main():
@@ -217,15 +217,15 @@ def main():
     # Determinar o ID da nova sessão com base no último valor do CSV
     last_session = get_last_session_id(LABEL_FILE)
     session_id[0] = last_session + 1
-    print(f"[INFO] Última sessão: {last_session} → Nova sessão: {session_id[0]}")
+    print(f"[INFO] Last session: {last_session} → New session: {session_id[0]}")
 
     rect = get_vrchat_window_bbox()
     if not rect:
-        print("[ERRO] Janela do VRChat não encontrada.")
+        print("[ERROR] Window not found.")
         return
 
-    print("Iniciando gravação. Pressione ESC para sair, P para pausar/resumir.")
-    print(f"[SESSÃO ATUAL] {session_id[0]}")
+    print("Starting recording. Press ESC to stop or P to pause/resume.")
+    print(f"[CURRENT SESSION] {session_id[0]}")
 
     threading.Thread(target=start_raw_input_listener, daemon=True).start()
     threading.Thread(target=keyboard.Listener(on_press=on_press, on_release=on_release).start, daemon=True).start()
@@ -256,10 +256,10 @@ def main():
 
         time.sleep(INTERVAL)
 
-    print("Finalizando gravação...")
+    print("Stopping recording...")
     frame_queue.join()
     label_queue.join()
-    print("Gravação finalizada.")
+    print("Recording stopped.")
     
 if __name__ == "__main__":
     main()
