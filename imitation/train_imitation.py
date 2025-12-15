@@ -14,6 +14,7 @@ from torchvision import transforms
 # Imports internos
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from agents.imitation_agent import ImitationAgentLSTM
+from utils.input_controller import TRAINING_KEYS, MOUSE_BUTTONS
 
 # Configurações
 IMAGE_DIR = "data/images"
@@ -33,7 +34,7 @@ def print_memory_usage(note=""):
     mem = psutil.virtual_memory()
     print(f"[RAM] {note} - Uso: {mem.used // (1024 ** 2)} MB / {mem.total // (1024 ** 2)} MB")
 
-class VRChatDataset(Dataset):
+class WindowDataset(Dataset):
     def __init__(self, label_file, use_cache=True, cache_dir=None, seq_len=6, frame_delay=5, norm_file=NORM_FILE):
         self.use_cache = use_cache
         self.cache_dir = cache_dir
@@ -102,11 +103,15 @@ class VRChatDataset(Dataset):
 
         target = self.raw_data[base_idx + self.frame_delay]
         keys = target["keys"].split("+") if target["keys"] else []
-        key_vec = [int(k in keys) for k in ["w", "s", "shift", "space", "a", "d"]]
+        key_vec = [int(k in keys) for k in TRAINING_KEYS]  # Fixed training keys
         dx = float(target["mouse_dx"]) / self.max_dx
         dy = float(target["mouse_dy"]) / self.max_dy
 
-        return frame_sequence, torch.tensor(key_vec, dtype=torch.float32), torch.tensor([dx, dy], dtype=torch.float32)
+        # Handle mouse button clicks
+        mouse_buttons = target["mouse_buttons"].split("+") if target["mouse_buttons"] else []
+        mouse_button_vec = [int(b in mouse_buttons) for b in MOUSE_BUTTONS]
+
+        return frame_sequence, torch.tensor(key_vec, dtype=torch.float32), torch.tensor([dx, dy], dtype=torch.float32), torch.tensor(mouse_button_vec, dtype=torch.float32)
 
 def print_progress_bar(iteration, total, prefix='', suffix='', length=30):
     percent = f"{100 * (iteration / float(total)):.1f}"
@@ -120,7 +125,7 @@ if __name__ == "__main__":
     print(f"[INFO] Using device: {DEVICE}")
     print(f"[INFO] Using image cache: {USE_IMAGE_CACHE}")
 
-    dataset = VRChatDataset(
+    dataset = WindowDataset(
         label_file=LABEL_FILE,
         use_cache=USE_IMAGE_CACHE,
         cache_dir=CACHE_DIR,
@@ -130,7 +135,7 @@ if __name__ == "__main__":
 
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
 
-    keyboard_model = ImitationAgentLSTM(output_dim=6, mode="keyboard").to(DEVICE)
+    keyboard_model = ImitationAgentLSTM(output_dim=len(TRAINING_KEYS), mode="keyboard").to(DEVICE)
     mouse_model = ImitationAgentLSTM(output_dim=2, mode="mouse").to(DEVICE)
 
     k_optimizer = optim.Adam(keyboard_model.parameters(), lr=1e-4)
@@ -146,18 +151,29 @@ if __name__ == "__main__":
             checkpoint = torch.load(CHECKPOINT_FILE, map_location=DEVICE)
             keyboard_model.load_state_dict(checkpoint["keyboard_model_state"])
             mouse_model.load_state_dict(checkpoint["mouse_model_state"])
+            # Load mouse click model state if available (for backward compatibility)
+            if "mouse_click_model_state" in checkpoint:
+                mouse_click_model.load_state_dict(checkpoint["mouse_click_model_state"])
             k_optimizer.load_state_dict(checkpoint["k_optimizer_state"])
             m_optimizer.load_state_dict(checkpoint["m_optimizer_state"])
+            # Load mouse click optimizer state if available (for backward compatibility)
+            if "mc_optimizer_state" in checkpoint:
+                mc_optimizer.load_state_dict(checkpoint["mc_optimizer_state"])
             start_epoch = checkpoint["epoch"]
 
+    # Create model for mouse button clicks
+    mouse_click_model = ImitationAgentLSTM(output_dim=len(MOUSE_BUTTONS), mode="mouse_click").to(DEVICE)
+    mc_optimizer = optim.Adam(mouse_click_model.parameters(), lr=1e-4)
+
     for epoch in range(start_epoch, EPOCHS):
-        total_k_loss, total_m_loss = 0.0, 0.0
+        total_k_loss, total_m_loss, total_mc_loss = 0.0, 0.0, 0.0
         num_batches = len(dataloader)
 
-        for i, (seqs, key_labels, mouse_labels) in enumerate(dataloader, 1):
+        for i, (seqs, key_labels, mouse_labels, mouse_click_labels) in enumerate(dataloader, 1):
             seqs = seqs.to(DEVICE)
             key_labels = key_labels.to(DEVICE)
             mouse_labels = mouse_labels.to(DEVICE)
+            mouse_click_labels = mouse_click_labels.to(DEVICE)
 
             k_optimizer.zero_grad()
             pred_keys = keyboard_model(seqs)
@@ -173,19 +189,29 @@ if __name__ == "__main__":
             m_optimizer.step()
             total_m_loss += m_loss.item()
 
+            mc_optimizer.zero_grad()
+            pred_mouse_clicks = mouse_click_model(seqs)
+            mc_loss = bce(pred_mouse_clicks, mouse_click_labels)  # Use BCE for binary classification
+            mc_loss.backward()
+            mc_optimizer.step()
+            total_mc_loss += mc_loss.item()
+
             print_progress_bar(i, num_batches, prefix=f"Epoch {epoch+1}", suffix="Training", length=40)
 
-        print(f"\n[Epoch {epoch+1}] Keyboard Loss: {total_k_loss / num_batches:.4f} | Mouse Loss: {total_m_loss / num_batches:.4f}")
+        print(f"\n[Epoch {epoch+1}] Keyboard Loss: {total_k_loss / num_batches:.4f} | Mouse Loss: {total_m_loss / num_batches:.4f} | Mouse Click Loss: {total_mc_loss / num_batches:.4f}")
         print_memory_usage(f"After epoch {epoch+1}")
 
         torch.save({
             "epoch": epoch + 1,
             "keyboard_model_state": keyboard_model.state_dict(),
             "mouse_model_state": mouse_model.state_dict(),
+            "mouse_click_model_state": mouse_click_model.state_dict(),
             "k_optimizer_state": k_optimizer.state_dict(),
-            "m_optimizer_state": m_optimizer.state_dict()
+            "m_optimizer_state": m_optimizer.state_dict(),
+            "mc_optimizer_state": mc_optimizer.state_dict()
         }, CHECKPOINT_FILE)
 
     torch.save(keyboard_model.state_dict(), "imitation_keyboard_latest.pth")
     torch.save(mouse_model.state_dict(), "imitation_mouse_latest.pth")
+    torch.save(mouse_click_model.state_dict(), "imitation_mouse_click_latest.pth")
     print("✅ Final models saved.")

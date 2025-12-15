@@ -11,3 +11,4 @@ keyboard
 ultralytics
 pywin32
 psutil
+pyserial

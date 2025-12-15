@@ -32,5 +32,7 @@ class ImitationAgentLSTM(nn.Module):
             return torch.sigmoid(x)
         elif self.mode == "mouse":
             return x
+        elif self.mode == "mouse_click":
+            return torch.sigmoid(x)  # Return probabilities for mouse clicks
         else:
             raise ValueError("Invalid Mode!")

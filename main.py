@@ -9,27 +9,9 @@ OPTIONS = {
     "1": ("Record data for imitation", "python data/record_screen.py"),
     "2": ("Train imitation model", "python imitation/train_imitation.py"),
     "3": ("Test imitation model", "python imitation/test_imitation.py"),
-    "4": ("Train with PPO", "python scripts/train_ppo.py"),
-    "5": ("Run AI with trained model (inference)", None),
+    "4": ("Run imitation model", "python scripts/run_imitation.py"),
     "q": ("Quit", None)
 }
-
-def run_inference():
-    print("\n[INFO] Choose the model to run:")
-    print("[1] Imitation (supervised model)")
-    print("[2] PPO (reinforcement learning model)")
-
-    choice = input("Model: ").strip()
-    if choice == "1":
-        command = "python scripts/run_imitation.py"
-    elif choice == "2":
-        command = "python scripts/run_inference.py"
-    else:
-        print("Invalid option.")
-        return
-
-    print(f"\n[INFO] Running: {command}")
-    subprocess.run(command, shell=True)
 
 def run_with_options(command: str, checkpoint_path: str):
     # Ask whether to use image cache
@@ -63,9 +45,7 @@ def main():
             print("Exiting...")
             break
 
-        if choice == "5":
-            run_inference()
-        elif choice == "2":
+        if choice == "2":
             run_with_options(command, CHECKPOINT_IMITATION)
         else:
             print(f"\n[INFO] Running: {desc}\n")

@@ -1,265 +1,225 @@
 import os
 import csv
-import uuid
 import time
-import threading
-from queue import Queue, Empty
-from PIL import ImageGrab
-from pynput import keyboard
-import win32gui
-import win32con
-import ctypes
-from ctypes import wintypes
+import queue
+from datetime import datetime
+import numpy as np
+import pyautogui
+from pynput import mouse, keyboard
 
-# === CONFIGURAÇÕES ===
-DATA_DIR = "data/images"
+# Local imports
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from utils.screen_utils import capture_window_frame
+from utils.input_controller import MOUSE_BUTTONS
+
+# Configuration
+IMAGE_DIR = "data/images"
 LABEL_FILE = "data/labels.csv"
-FPS = 20
-INTERVAL = 1.0 / FPS
-IMAGE_FORMAT = "jpeg"
-JPEG_QUALITY = 90
+MAX_RECORDING_DURATION = 3600  # Maximum recording duration in seconds
+FPS = 20  # Frames per second
+FRAME_DELAY = 1.0 / FPS
 
-# === ESTADO GLOBAL ===
-pressed_keys = set()
-mouse_dx = 0
-mouse_dy = 0
-recording = [True]
-paused = [False]
-session_id = [1]
-frame_queue = Queue()
-label_queue = Queue()
+# Create directories
+os.makedirs(IMAGE_DIR, exist_ok=True)
 
-# === DEFINIÇÕES RAW INPUT ===
-WM_INPUT = 0x00FF
-RID_INPUT = 0x10000003
-RIM_TYPEMOUSE = 0
+class InputRecorder:
+    def __init__(self):
+        self.start_time = time.time()
+        self.current_keys = set()
+        self.current_mouse_buttons = set()
+        self.events_queue = queue.Queue()
+        self.recording = False
+        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.quit_pressed = False  # Track if quit key was pressed
 
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-wintypes.HCURSOR = wintypes.HANDLE
-wintypes.HICON = wintypes.HANDLE
-wintypes.HWND = wintypes.HANDLE
-wintypes.HINSTANCE = wintypes.HANDLE
-wintypes.HMENU = wintypes.HANDLE
-wintypes.LRESULT = ctypes.c_long
+        # Mouse listener
+        self.mouse_listener = mouse.Listener(
+            on_move=self.on_mouse_move,
+            on_click=self.on_mouse_click,
+            on_scroll=self.on_mouse_scroll
+        )
 
-class RAWINPUTDEVICE(ctypes.Structure):
-    _fields_ = [("usUsagePage", wintypes.USHORT),
-                ("usUsage", wintypes.USHORT),
-                ("dwFlags", wintypes.DWORD),
-                ("hwndTarget", wintypes.HWND)]
+        # Keyboard listener
+        self.keyboard_listener = keyboard.Listener(
+            on_press=self.on_key_press,
+            on_release=self.on_key_release
+        )
 
-class RAWINPUTHEADER(ctypes.Structure):
-    _fields_ = [("dwType", wintypes.DWORD),
-                ("dwSize", wintypes.DWORD),
-                ("hDevice", wintypes.HANDLE),
-                ("wParam", wintypes.WPARAM)]
+    def on_key_press(self, key):
+        try:
+            # Handle regular character keys
+            if hasattr(key, 'char') and key.char is not None:
+                self.current_keys.add(key.char.upper())
+            elif key == keyboard.Key.esc:
+                self.quit_pressed = True
+            elif key == keyboard.Key.space:
+                self.current_keys.add('SPACE')
+            elif key == keyboard.Key.enter:
+                self.current_keys.add('ENTER')
+            elif key == keyboard.Key.tab:
+                self.current_keys.add('TAB')
+            elif key == keyboard.Key.backspace:
+                self.current_keys.add('BACKSPACE')
+            elif key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
+                self.current_keys.add('CTRL')
+            elif key == keyboard.Key.alt_l or key == keyboard.Key.alt_r:
+                self.current_keys.add('ALT')
+            elif key == keyboard.Key.shift_l or key == keyboard.Key.shift_r:
+                self.current_keys.add('SHIFT')
+            elif str(key).startswith('Key.'):
+                # Handle other special keys like Key.f1, Key.up, etc.
+                special_key = str(key).replace('Key.', '').upper()
+                self.current_keys.add(special_key)
+        except Exception as e:
+            print(f"[DEBUG] Error in on_key_press: {e}")
 
-class RAWMOUSE(ctypes.Structure):
-    _fields_ = [("usFlags", wintypes.USHORT),
-                ("usButtonFlags", wintypes.USHORT),
-                ("usButtonData", wintypes.USHORT),
-                ("ulRawButtons", wintypes.ULONG),
-                ("lLastX", wintypes.LONG),
-                ("lLastY", wintypes.LONG),
-                ("ulExtraInformation", wintypes.ULONG)]
+    def on_key_release(self, key):
+        try:
+            # Handle regular character keys
+            if hasattr(key, 'char') and key.char is not None:
+                self.current_keys.discard(key.char.upper())
+            elif key == keyboard.Key.esc:
+                self.quit_pressed = False  # Reset quit state when ESC is released
+            elif key == keyboard.Key.space:
+                self.current_keys.discard('SPACE')
+            elif key == keyboard.Key.enter:
+                self.current_keys.discard('ENTER')
+            elif key == keyboard.Key.tab:
+                self.current_keys.discard('TAB')
+            elif key == keyboard.Key.backspace:
+                self.current_keys.discard('BACKSPACE')
+            elif key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
+                self.current_keys.discard('CTRL')
+            elif key == keyboard.Key.alt_l or key == keyboard.Key.alt_r:
+                self.current_keys.discard('ALT')
+            elif key == keyboard.Key.shift_l or key == keyboard.Key.shift_r:
+                self.current_keys.discard('SHIFT')
+            elif str(key).startswith('Key.'):
+                # Handle other special keys like Key.f1, Key.up, etc.
+                special_key = str(key).replace('Key.', '').upper()
+                self.current_keys.discard(special_key)
+        except Exception as e:
+            print(f"[DEBUG] Error in on_key_release: {e}")
 
-class RAWINPUTUNION(ctypes.Union):
-    _fields_ = [("mouse", RAWMOUSE),
-                ("keyboard", wintypes.BYTE * 24),
-                ("hid", wintypes.BYTE * 24)]
-
-class RAWINPUT(ctypes.Structure):
-    _fields_ = [("header", RAWINPUTHEADER),
-                ("data", RAWINPUTUNION)]
-
-WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
-user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-user32.DefWindowProcW.restype = ctypes.c_long
-
-def wnd_proc(hwnd, msg, wparam, lparam):
-    global mouse_dx, mouse_dy
-    if msg == WM_INPUT:
-        dwSize = wintypes.UINT()
-        user32.GetRawInputData(lparam, RID_INPUT, None, ctypes.byref(dwSize), ctypes.sizeof(RAWINPUTHEADER))
-        buf = ctypes.create_string_buffer(dwSize.value)
-        user32.GetRawInputData(lparam, RID_INPUT, buf, ctypes.byref(dwSize), ctypes.sizeof(RAWINPUTHEADER))
-        raw = ctypes.cast(buf, ctypes.POINTER(RAWINPUT)).contents
-        if raw.header.dwType == RIM_TYPEMOUSE:
-            mouse_dx += raw.data.mouse.lLastX
-            mouse_dy += raw.data.mouse.lLastY
-    return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
-
-def start_raw_input_listener():
-    class WNDCLASS(ctypes.Structure):
-        _fields_ = [("style", wintypes.UINT),
-                    ("lpfnWndProc", WNDPROC),
-                    ("cbClsExtra", ctypes.c_int),
-                    ("cbWndExtra", ctypes.c_int),
-                    ("hInstance", wintypes.HINSTANCE),
-                    ("hIcon", wintypes.HICON),
-                    ("hCursor", wintypes.HCURSOR),
-                    ("hbrBackground", wintypes.HBRUSH),
-                    ("lpszMenuName", wintypes.LPCWSTR),
-                    ("lpszClassName", wintypes.LPCWSTR)]
-
-    hInstance = kernel32.GetModuleHandleW(None)
-    className = "RawInputCapture"
-
-    wnd_class = WNDCLASS()
-    wnd_class.lpfnWndProc = WNDPROC(wnd_proc)
-    wnd_class.hInstance = hInstance
-    wnd_class.lpszClassName = className
-
-    if not user32.RegisterClassW(ctypes.byref(wnd_class)):
-        raise ctypes.WinError()
-
-    hwnd = user32.CreateWindowExW(0, className, className, 0,
-                                  0, 0, 0, 0,
-                                  None, None, hInstance, None)
-
-    rid = RAWINPUTDEVICE(0x01, 0x02, 0x00000100, hwnd)
-    if not user32.RegisterRawInputDevices(ctypes.byref(rid), 1, ctypes.sizeof(rid)):
-        raise ctypes.WinError()
-
-    msg = wintypes.MSG()
-    while recording[0]:
-        if user32.GetMessageW(ctypes.byref(msg), hwnd, 0, 0) > 0:
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
-
-def on_press(key):
-    try:
-        if hasattr(key, 'char') and key.char:
-            char = key.char.lower()
-            pressed_keys.add(char)
-            if char == 'p':
-                paused[0] = not paused[0]
-                if paused[0]:
-                    print("[PAUSE]")
-                else:
-                    session_id[0] += 1
-                    print(f"[RESUME] New session: {session_id[0]}")
-        elif hasattr(key, 'name'):
-            pressed_keys.add(key.name)
-    except:
+    def on_mouse_move(self, x, y):
+        # Record mouse movement if needed
         pass
 
-def on_release(key):
-    try:
-        if hasattr(key, 'char') and key.char:
-            pressed_keys.discard(key.char.lower())
-        elif hasattr(key, 'name'):
-            pressed_keys.discard(key.name)
-        if key == keyboard.Key.esc:
-            recording[0] = False
-            return False
-    except:
+    def on_mouse_click(self, x, y, button, pressed):
+        # Convert button to string and extract the actual button name
+        button_str = str(button)
+        # Format is "Button.left", "Button.right", etc.
+        if 'left' in button_str:
+            button_name = 'L'
+        elif 'right' in button_str:
+            button_name = 'R'
+        elif 'middle' in button_str:
+            button_name = 'M'
+        else:
+            # Extract button name from string representation
+            button_name = str(button).replace('Button.', '').upper()
+
+        if pressed:
+            self.current_mouse_buttons.add(button_name)
+        else:
+            self.current_mouse_buttons.discard(button_name)
+
+    def on_mouse_scroll(self, x, y, dx, dy):
+        # Handle scroll if needed
         pass
 
-def get_vrchat_window_bbox():
-    hwnd = win32gui.FindWindow(None, "VRChat")
-    if hwnd:
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        win32gui.SetForegroundWindow(hwnd)
-        return win32gui.GetWindowRect(hwnd)
-    return None
+    def start_recording(self):
+        self.recording = True
+        self.start_time = time.time()
+        self.mouse_listener.start()
+        self.keyboard_listener.start()
 
-def save_label(image_name, keys, dx, dy, timestamp, session):
-    with open(LABEL_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([image_name, "+".join(keys), dx, dy, f"{timestamp:.3f}", session])
+        print("[INFO] Recording started. Press ESC to quit.")
 
-def image_worker():
-    while recording[0] or not frame_queue.empty():
+        # Initialize CSV file - truncate if it exists to start fresh
+        fieldnames = ['timestamp', 'session_id', 'image', 'keys', 'mouse_dx', 'mouse_dy', 'mouse_buttons']
+        with open(LABEL_FILE, 'w', newline='') as csvfile:  # Use 'w' to overwrite and start fresh
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+
+        # Main recording loop
+        last_mouse_pos = pyautogui.position()
+        frame_count = 0
+
         try:
-            img, path = frame_queue.get(timeout=0.1)
-            if IMAGE_FORMAT == "jpeg":
-                img.convert("RGB").save(path, format="JPEG", quality=JPEG_QUALITY)
-            else:
-                img.save(path, format="PNG")
-            frame_queue.task_done()
-        except Empty:
-            continue
+            while self.recording:
+                current_time = time.time()
 
-def label_worker():
-    while recording[0] or not label_queue.empty():
-        try:
-            args = label_queue.get(timeout=0.1)
-            save_label(*args)
-            label_queue.task_done()
-        except Empty:
-            continue
+                # Check for quit condition - use the flag we set in the keyboard handler
+                if self.quit_pressed:
+                    print("[INFO] Quit key (ESC) detected. Stopping recording...")
+                    break
 
-def get_last_session_id(label_file):
-    if not os.path.exists(label_file):
-        return 0
-    try:
-        with open(label_file, "r") as f:
-            reader = csv.DictReader(f)
-            last_id = 0
-            for row in reader:
-                if "session_id" in row and row["session_id"].isdigit():
-                    last_id = max(last_id, int(row["session_id"]))
-        return last_id
-    except Exception as e:
-        print(f"[ERROR] Fail to get last session id: {e}")
-        return 0
+                # Check duration limit
+                if current_time - self.start_time > MAX_RECORDING_DURATION:
+                    print("[INFO] Maximum recording duration reached.")
+                    break
+
+                # Capture frame
+                img = capture_window_frame()
+                if img is None:
+                    print("[WARNING] Could not capture frame, skipping...")
+                    time.sleep(FRAME_DELAY)
+                    continue
+
+                # Save image
+                timestamp = int(current_time * 1000)  # milliseconds
+                image_filename = f"frame_{self.session_id}_{frame_count:06d}.png"
+                image_path = os.path.join(IMAGE_DIR, image_filename)
+                img.save(image_path)
+
+                # Calculate mouse movement since last frame
+                current_mouse_pos = pyautogui.position()
+                dx = current_mouse_pos.x - last_mouse_pos.x
+                dy = current_mouse_pos.y - last_mouse_pos.y
+                last_mouse_pos = current_mouse_pos
+
+                # Write to CSV
+                with open(LABEL_FILE, 'a', newline='') as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writerow({
+                        'timestamp': timestamp,
+                        'session_id': self.session_id,
+                        'image': image_filename,
+                        'keys': '+'.join(sorted(self.current_keys)),
+                        'mouse_dx': dx,
+                        'mouse_dy': dy,
+                        'mouse_buttons': '+'.join(sorted(self.current_mouse_buttons))
+                    })
+
+                frame_count += 1
+                print(f"[INFO] Frame {frame_count} recorded - Keys: {sorted(self.current_keys)}, Buttons: {sorted(self.current_mouse_buttons)}", end='\r')
+
+                time.sleep(FRAME_DELAY)
+
+        except KeyboardInterrupt:
+            print("\n[INFO] Recording interrupted by user.")
+
+        finally:
+            self.stop_recording()
+
+    def stop_recording(self):
+        self.recording = False
+        if self.mouse_listener.is_alive():
+            self.mouse_listener.stop()
+        if self.keyboard_listener.is_alive():
+            self.keyboard_listener.stop()
+        print(f"\n[INFO] Recording stopped. Total frames: {int((time.time() - self.start_time) * FPS)}")
 
 def main():
-    os.makedirs(DATA_DIR, exist_ok=True)
+    recorder = InputRecorder()
+    try:
+        recorder.start_recording()
+    except Exception as e:
+        print(f"[ERROR] Recording failed with error: {e}")
+        import traceback
+        traceback.print_exc()
 
-    # Se o arquivo não existe, criar com cabeçalho
-    if not os.path.exists(LABEL_FILE):
-        with open(LABEL_FILE, "w", newline="") as f:
-            csv.writer(f).writerow(["image", "keys", "mouse_dx", "mouse_dy", "timestamp", "session_id"])
-
-    # Determinar o ID da nova sessão com base no último valor do CSV
-    last_session = get_last_session_id(LABEL_FILE)
-    session_id[0] = last_session + 1
-    print(f"[INFO] Last session: {last_session} → New session: {session_id[0]}")
-
-    rect = get_vrchat_window_bbox()
-    if not rect:
-        print("[ERROR] Window not found.")
-        return
-
-    print("Starting recording. Press ESC to stop or P to pause/resume.")
-    print(f"[CURRENT SESSION] {session_id[0]}")
-
-    threading.Thread(target=start_raw_input_listener, daemon=True).start()
-    threading.Thread(target=keyboard.Listener(on_press=on_press, on_release=on_release).start, daemon=True).start()
-
-    for _ in range(2):
-        threading.Thread(target=image_worker, daemon=True).start()
-        threading.Thread(target=label_worker, daemon=True).start()
-
-    global mouse_dx, mouse_dy
-    start_time = time.time()
-
-    while recording[0]:
-        if paused[0]:
-            time.sleep(0.1)
-            continue
-
-        timestamp = time.time() - start_time
-
-        img = ImageGrab.grab(bbox=rect).resize((224, 224))
-        filename = f"{uuid.uuid4()}.{IMAGE_FORMAT}"
-        path = os.path.join(DATA_DIR, filename)
-
-        frame_queue.put((img, path))
-        label_queue.put((filename, pressed_keys.copy(), mouse_dx, mouse_dy, timestamp, session_id[0]))
-
-        mouse_dx = 0
-        mouse_dy = 0
-
-        time.sleep(INTERVAL)
-
-    print("Stopping recording...")
-    frame_queue.join()
-    label_queue.join()
-    print("Recording stopped.")
-    
 if __name__ == "__main__":
     main()
